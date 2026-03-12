@@ -580,7 +580,20 @@ function PostModal({ mode, data, onSave, onClose }) {
           </div>
           <div>
             <label className="lbl" style={{display:"block",marginBottom:8}}>Content</label>
-            <textarea className="input" placeholder="Full post content. Double line break = new paragraph." value={form.content||""} onChange={e=>set("content",e.target.value)} style={{minHeight:220}} />
+            <div style={{background:"var(--s3)",border:"1px solid var(--bd)",borderRadius:8,padding:"12px 14px",marginBottom:10,fontSize:12,color:"var(--dim)",lineHeight:1.8}}>
+              <span style={{color:"var(--pink)",fontWeight:600}}>Formatting guide: </span>
+              <span style={{opacity:.8}}>
+                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>## Heading</code>{" · "}
+                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>**bold**</code>{" · "}
+                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>{"> quote"}</code>{" · "}
+                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>---</code>{" divider · "}
+                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>{"![caption](url)"}</code>{" image · "}
+                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>@youtube(VIDEO_ID)</code>{" · "}
+                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>@video(url)</code>
+                {" · Use double line break between blocks"}
+              </span>
+            </div>
+            <textarea className="input" placeholder={"Write your post here...\n\nUse double line breaks between paragraphs.\n\n## Add a heading like this\n\n![Image caption](https://your-image-url.jpg)\n\n@youtube(dQw4w9WgXcQ)\n\n> This is a pull quote that stands out"} value={form.content||""} onChange={e=>set("content",e.target.value)} style={{minHeight:300,fontFamily:"monospace",fontSize:13}} />
           </div>
           <div style={{display:"flex",alignItems:"center",gap:10}}>
             <input type="checkbox" id="bp-feat" checked={!!form.featured} onChange={e=>set("featured",e.target.checked)} style={{width:15,height:15,accentColor:"var(--pink)",cursor:"pointer"}} />
