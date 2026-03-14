@@ -57,6 +57,19 @@ async function storageDelete(name) {
 }
 
 /* ═══════════════════════════════════════════════
+   SLUG HELPER
+═══════════════════════════════════════════════ */
+function slugify(str) {
+  return str
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 80);
+}
+
+/* ═══════════════════════════════════════════════
    AUTH
 ═══════════════════════════════════════════════ */
 const ADMIN_PW = "1204admin2026";
@@ -459,7 +472,7 @@ function Dashboard() {
 /* ═══════════════════════════════════════════════
    BLOG MANAGER
 ═══════════════════════════════════════════════ */
-const EMPTY_POST = { title:"", tag:"", date:"", read_time:"", summary:"", content:"", cover_image:"", featured:false, display_order:0 };
+const EMPTY_POST = { title:"", slug:"", tag:"", date:"", read_time:"", summary:"", content:"", cover_image:"", featured:false, display_order:0 };
 
 function BlogManager() {
   const [posts, setPosts]     = useState([]);
@@ -479,8 +492,9 @@ function BlogManager() {
 
   const save = useCallback(async (data) => {
     try {
-      if (data.id) { const{id,...r}=data; await sbFetch(`blog_posts?id=eq.${id}`,{method:"PATCH",body:r}); show("Post updated"); }
-      else { await sbFetch("blog_posts",{method:"POST",body:data}); show("Post published"); }
+      const {_slugEdited:_b, ...blogPayload} = data;
+      if (blogPayload.id) { const{id,...r}=blogPayload; await sbFetch(`blog_posts?id=eq.${id}`,{method:"PATCH",body:r}); show("Post updated"); }
+      else { await sbFetch("blog_posts",{method:"POST",body:blogPayload}); show("Post published"); }
       setModal(null); load();
     } catch(e) { show("Save failed: "+e.message,"error"); }
   }, [load, show]);
@@ -542,7 +556,13 @@ function BlogManager() {
 function PostModal({ mode, data, onSave, onClose }) {
   const [form, setForm]     = useState(data);
   const [saving, setSaving] = useState(false);
-  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+  const set = (k,v) => setForm(f => {
+    const updated = {...f,[k]:v};
+    // Auto-generate slug from title only when creating new post and slug hasn't been manually edited
+    if (k === "title" && !f._slugEdited) updated.slug = slugify(v);
+    if (k === "slug") updated._slugEdited = true;
+    return updated;
+  });
   const submit = async () => {
     if (!form.title?.trim()) return alert("Title is required.");
     setSaving(true); await onSave(form); setSaving(false);
@@ -560,6 +580,15 @@ function PostModal({ mode, data, onSave, onClose }) {
             <div style={{gridColumn:"1/-1"}}>
               <label className="lbl" style={{display:"block",marginBottom:8}}>Title</label>
               <input className="input" placeholder="Post title" value={form.title||""} onChange={e=>set("title",e.target.value)} />
+            </div>
+            <div style={{gridColumn:"1/-1"}}>
+              <label className="lbl" style={{display:"block",marginBottom:8}}>URL Slug</label>
+              <div style={{display:"flex",alignItems:"center",gap:0,background:"var(--s2)",border:"1px solid var(--bd)",borderRadius:8,overflow:"hidden"}}>
+                <span style={{padding:"10px 12px",fontSize:13,color:"var(--muted)",borderRight:"1px solid var(--bd)",whiteSpace:"nowrap",flexShrink:0}}>1204studios.com/blog/</span>
+                <input className="input" placeholder="url-slug-here" value={form.slug||""} onChange={e=>set("slug",e.target.value)}
+                  style={{border:"none",borderRadius:0,background:"transparent",fontFamily:"monospace"}} />
+              </div>
+              <p style={{fontSize:11,color:"var(--muted)",marginTop:5}}>Auto-generated from title. Edit to customise.</p>
             </div>
             <div>
               <label className="lbl" style={{display:"block",marginBottom:8}}>Tag</label>
@@ -614,7 +643,7 @@ function PostModal({ mode, data, onSave, onClose }) {
 /* ═══════════════════════════════════════════════
    PORTFOLIO MANAGER
 ═══════════════════════════════════════════════ */
-const EMPTY_CS = { title:"", category:"", year:"", hero_color:"#1a1a2e", cover_image:"", summary:"", challenge:"", approach:"", result:"", tags:"", featured:false, display_order:0 };
+const EMPTY_CS = { title:"", slug:"", category:"", year:"", hero_color:"#1a1a2e", cover_image:"", summary:"", challenge:"", approach:"", result:"", tags:"", featured:false, display_order:0 };
 
 function PortfolioManager() {
   const [items, setItems]     = useState([]);
@@ -634,7 +663,8 @@ function PortfolioManager() {
 
   const save = useCallback(async (data) => {
     try {
-      const payload = {...data, tags: typeof data.tags==="string"?data.tags.split(",").map(t=>t.trim()).filter(Boolean):data.tags||[]};
+      const {_slugEdited:_c, ...csData} = data;
+      const payload = {...csData, tags: typeof csData.tags==="string"?csData.tags.split(",").map(t=>t.trim()).filter(Boolean):csData.tags||[]};
       if (payload.id) { const{id,...r}=payload; await sbFetch(`case_studies?id=eq.${id}`,{method:"PATCH",body:r}); show("Updated"); }
       else { await sbFetch("case_studies",{method:"POST",body:payload}); show("Created"); }
       setModal(null); load();
@@ -693,7 +723,13 @@ function PortfolioManager() {
 function CSModal({ mode, data, onSave, onClose }) {
   const [form, setForm]     = useState(data);
   const [saving, setSaving] = useState(false);
-  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+  const set = (k,v) => setForm(f => {
+    const updated = {...f,[k]:v};
+    // Auto-generate slug from title only when creating new post and slug hasn't been manually edited
+    if (k === "title" && !f._slugEdited) updated.slug = slugify(v);
+    if (k === "slug") updated._slugEdited = true;
+    return updated;
+  });
   const submit = async () => {
     if (!form.title?.trim()) return alert("Title is required.");
     setSaving(true); await onSave(form); setSaving(false);
@@ -711,6 +747,15 @@ function CSModal({ mode, data, onSave, onClose }) {
             <div style={{gridColumn:"1/-1"}}>
               <label className="lbl" style={{display:"block",marginBottom:8}}>Project Title</label>
               <input className="input" placeholder="e.g. Greenleaf Environmental Agency" value={form.title||""} onChange={e=>set("title",e.target.value)} />
+            </div>
+            <div style={{gridColumn:"1/-1"}}>
+              <label className="lbl" style={{display:"block",marginBottom:8}}>URL Slug</label>
+              <div style={{display:"flex",alignItems:"center",gap:0,background:"var(--s2)",border:"1px solid var(--bd)",borderRadius:8,overflow:"hidden"}}>
+                <span style={{padding:"10px 12px",fontSize:13,color:"var(--muted)",borderRight:"1px solid var(--bd)",whiteSpace:"nowrap",flexShrink:0}}>1204studios.com/portfolio/</span>
+                <input className="input" placeholder="url-slug-here" value={form.slug||""} onChange={e=>set("slug",e.target.value)}
+                  style={{border:"none",borderRadius:0,background:"transparent",fontFamily:"monospace"}} />
+              </div>
+              <p style={{fontSize:11,color:"var(--muted)",marginTop:5}}>Auto-generated from title. Edit to customise.</p>
             </div>
             <div>
               <label className="lbl" style={{display:"block",marginBottom:8}}>Category</label>
