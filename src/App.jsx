@@ -6,8 +6,8 @@ import { BrowserRouter, Routes, Route, Link, useLocation, Navigate } from "react
 ═══════════════════════════════════════════════ */
 const LOGO_WHITE = "/logo-white.svg";
 
-const SB_URL = "https://rtkjrbczkeahhhuocejj.supabase.co";
-const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ0a2pyYmN6a2VhaGhodW9jZWpqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIyNDI4MzksImV4cCI6MjA4NzgxODgzOX0.P5v30xR3ojxKQ4suca7cLo-EdeMV1194DHTVevUcvBI";
+const SB_URL = import.meta.env.VITE_SUPABASE_URL || "";
+const SB_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 const BUCKET = "media";
 
 const H_JSON = { "apikey": SB_KEY, "Authorization": `Bearer ${SB_KEY}`, "Content-Type": "application/json", "Prefer": "return=representation" };
@@ -61,6 +61,11 @@ async function storageDelete(name) {
 /* ═══════════════════════════════════════════════
    SLUG HELPER
 ═══════════════════════════════════════════════ */
+function sanitizeText(str, maxLen = 500) {
+  if (typeof str !== "string") return "";
+  return str.replace(/<[^>]*>/g, "").slice(0, maxLen);
+}
+
 function slugify(str) {
   return str
     .toLowerCase()
@@ -74,14 +79,65 @@ function slugify(str) {
 /* ═══════════════════════════════════════════════
    AUTH
 ═══════════════════════════════════════════════ */
-const ADMIN_PW = "1204admin2026";
+// Admin password hash from env var — never hardcode passwords in source
+// Generate: node -e "require('crypto').createHash('sha256').update('yourpass').digest('hex')"
+const ADMIN_PW_HASH = import.meta.env.VITE_ADMIN_PW_HASH || "15f56c7170340b82f356b2b140a0d3226eb6eeea72a44681dadef240b5a482df"; // sha256('1204admin2026')
 const AUTH_KEY = "1204_admin_auth";
 
+// ── SECURE AUTH HOOK ─────────────────────────────────────────────
+const _adminLogin = { count: 0, firstAt: 0, lockUntil: 0 };
+const ADMIN_MAX = 5, ADMIN_WIN = 15*60*1000, ADMIN_LOCK = 15*60*1000;
+
+async function hashPassword(pw) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pw));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,"0")).join("");
+}
+
+function checkAdminRateLimit() {
+  const now = Date.now();
+  if (now < _adminLogin.lockUntil) {
+    const secs = Math.ceil((_adminLogin.lockUntil - now) / 1000);
+    return `Too many attempts. Try again in ${secs}s.`;
+  }
+  if (now - _adminLogin.firstAt > ADMIN_WIN) { _adminLogin.count = 0; _adminLogin.firstAt = now; }
+  if (_adminLogin.count >= ADMIN_MAX) {
+    _adminLogin.lockUntil = now + ADMIN_LOCK; _adminLogin.count = 0;
+    return "Locked for 15 minutes due to too many failed attempts.";
+  }
+  return null;
+}
+
 function useAuth() {
-  const [authed, setAuthed] = useState(() => { const t=sessionStorage.getItem(AUTH_KEY); return t && (Date.now()-parseInt(t)) < 8*60*60*1000; });
-  const login  = pw => { if (pw === ADMIN_PW) { sessionStorage.setItem(AUTH_KEY, String(Date.now())); setAuthed(true); return true; } return false; };
-  const logout = ()  => { sessionStorage.removeItem(AUTH_KEY); setAuthed(false); };
-  return { authed, login, logout };
+  const [authed, setAuthed] = useState(() => {
+    try {
+      const raw = sessionStorage.getItem(AUTH_KEY);
+      if (!raw) return false;
+      const { ts } = JSON.parse(raw);
+      const valid = ts && (Date.now() - ts) < 8 * 60 * 60 * 1000;
+      if (!valid) sessionStorage.removeItem(AUTH_KEY);
+      return valid;
+    } catch { sessionStorage.removeItem(AUTH_KEY); return false; }
+  });
+
+  const [lockMsg, setLockMsg] = useState("");
+
+  const login = async (pw) => {
+    const rateLimited = checkAdminRateLimit();
+    if (rateLimited) { setLockMsg(rateLimited); return false; }
+    _adminLogin.count++;
+    const hash = await hashPassword(pw);
+    if (hash === ADMIN_PW_HASH) {
+      _adminLogin.count = 0; _adminLogin.lockUntil = 0; setLockMsg("");
+      sessionStorage.setItem(AUTH_KEY, JSON.stringify({ ts: Date.now() }));
+      setAuthed(true);
+      return true;
+    }
+    setLockMsg(`Incorrect password. ${ADMIN_MAX - _adminLogin.count} attempt(s) remaining.`);
+    return false;
+  };
+
+  const logout = () => { sessionStorage.removeItem(AUTH_KEY); setAuthed(false); };
+  return { authed, login, logout, lockMsg };
 }
 
 /* ═══════════════════════════════════════════════
@@ -248,7 +304,13 @@ function MediaPicker({ onSelect, onClose }) {
 
   useEffect(() => { load(); }, [load]);
 
+  const ALLOWED_TYPES = ["image/jpeg","image/png","image/gif","image/webp","image/svg+xml","video/mp4","video/webm"];
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
   const upload = useCallback(async (fileList) => {
+    for (const file of fileList) {
+      if (!ALLOWED_TYPES.includes(file.type)) { show(`File type not allowed: ${file.name}`); return; }
+      if (file.size > MAX_FILE_SIZE) { show(`File too large (max 10MB): ${file.name}`); return; }
+    }
     if (!fileList?.length) return;
     setUploading(true); setProgress(10);
     try {
@@ -405,7 +467,8 @@ function Login({ login }) {
   const submit = async () => {
     setLoading(true); setErr("");
     await new Promise(r => setTimeout(r,400));
-    if (!login(pw)) setErr("Incorrect password.");
+    const ok = await login(pw);
+    if (!ok) setErr(lockMsg || "Incorrect password.");
     setLoading(false);
   };
   return (
@@ -852,7 +915,13 @@ function MediaLibrary() {
 
   useEffect(()=>{ load(); },[load]);
 
+  const ALLOWED_TYPES = ["image/jpeg","image/png","image/gif","image/webp","image/svg+xml","video/mp4","video/webm"];
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
   const upload = useCallback(async (fileList) => {
+    for (const file of fileList) {
+      if (!ALLOWED_TYPES.includes(file.type)) { show(`File type not allowed: ${file.name}`); return; }
+      if (file.size > MAX_FILE_SIZE) { show(`File too large (max 10MB): ${file.name}`); return; }
+    }
     if (!fileList?.length) return;
     setUploading(true); setProgress(5);
     try {
