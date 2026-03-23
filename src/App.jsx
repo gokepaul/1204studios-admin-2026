@@ -1,30 +1,30 @@
 import { useState, useEffect, useCallback, useRef, memo, useMemo } from "react";
 import { BrowserRouter, Routes, Route, Link, useLocation, Navigate } from "react-router-dom";
-import { useQuery, useMutation, anyApi } from "convex/react";
+import { useQuery, useMutation } from "convex/react";
 
 const api = {
   cms: {
-    listPosts:          anyApi.cms.listPosts,
-    listCaseStudies:    anyApi.cms.listCaseStudies,
-    createPost:         anyApi.cms.createPost,
-    updatePost:         anyApi.cms.updatePost,
-    deletePost:         anyApi.cms.deletePost,
-    createCaseStudy:    anyApi.cms.createCaseStudy,
-    updateCaseStudy:    anyApi.cms.updateCaseStudy,
-    deleteCaseStudy:    anyApi.cms.deleteCaseStudy,
+    listPosts:          "cms:listPosts",
+    listCaseStudies:    "cms:listCaseStudies",
+    createPost:         "cms:createPost",
+    updatePost:         "cms:updatePost",
+    deletePost:         "cms:deletePost",
+    createCaseStudy:    "cms:createCaseStudy",
+    updateCaseStudy:    "cms:updateCaseStudy",
+    deleteCaseStudy:    "cms:deleteCaseStudy",
   },
   leads: {
-    listLeads:              anyApi.leads.listLeads,
-    createLead:             anyApi.leads.createLead,
-    updateLead:             anyApi.leads.updateLead,
-    deleteLead:             anyApi.leads.deleteLead,
-    convertLeadToClient:    anyApi.leads.convertLeadToClient,
+    listLeads:           "leads:listLeads",
+    createLead:          "leads:createLead",
+    updateLead:          "leads:updateLead",
+    deleteLead:          "leads:deleteLead",
+    convertLeadToClient: "leads:convertLeadToClient",
   },
   clients: {
-    listClients:    anyApi.clients.listClients,
-    createClient:   anyApi.clients.createClient,
-    updateClient:   anyApi.clients.updateClient,
-    deleteClient:   anyApi.clients.deleteClient,
+    listClients:   "clients:listClients",
+    createClient:  "clients:createClient",
+    updateClient:  "clients:updateClient",
+    deleteClient:  "clients:deleteClient",
   },
 };
 
@@ -59,23 +59,25 @@ function useAuth() {
   const login = async (pw) => {
     const now = Date.now();
     if (now < _adminLogin.lockUntil) {
-      setLockMsg(`Too many attempts. Wait ${Math.ceil((_adminLogin.lockUntil-now)/1000)}s.`);
-      return false;
+      const msg = `Too many attempts. Wait ${Math.ceil((_adminLogin.lockUntil-now)/1000)}s.`;
+      setLockMsg(msg);
+      return msg;
     }
     if (now - _adminLogin.firstAt > 15*60*1000) { _adminLogin.count=0; _adminLogin.firstAt=now; }
     if (_adminLogin.count >= 5) {
       _adminLogin.lockUntil = now + 15*60*1000; _adminLogin.count = 0;
-      setLockMsg("Locked for 15 minutes."); return false;
+      setLockMsg("Locked for 15 minutes."); return "Locked for 15 minutes.";
     }
     _adminLogin.count++;
     const hash = await hashPassword(pw);
     if (hash === ADMIN_PW_HASH) {
       _adminLogin.count = 0; _adminLogin.lockUntil = 0; setLockMsg("");
       sessionStorage.setItem(AUTH_KEY, JSON.stringify({ ts: Date.now() }));
-      setAuthed(true); return true;
+      setAuthed(true); return true;  // true = success
     }
-    setLockMsg(`Incorrect password. ${5 - _adminLogin.count} attempt(s) remaining.`);
-    return false;
+    const msg = `Incorrect password. ${5 - _adminLogin.count} attempt(s) remaining.`;
+    setLockMsg(msg);
+    return msg;  // return error message so Login can use it immediately
   };
   const logout = () => { sessionStorage.removeItem(AUTH_KEY); setAuthed(false); };
   return { authed, login, logout, lockMsg };
@@ -300,14 +302,14 @@ function Sidebar({ logout }) {
 /* ═══════════════════════════════════════════════
    LOGIN
 ═══════════════════════════════════════════════ */
-function Login({ login, lockMsg }) {
-  const [pw, setPw]         = useState("");
-  const [err, setErr]       = useState("");
+function Login({ login, lockMsg = "" }) {
+  const [pw, setPw]           = useState("");
+  const [err, setErr]         = useState("");
   const [loading, setLoading] = useState(false);
   const submit = async () => {
     setLoading(true); setErr("");
-    const ok = await login(pw);
-    if (!ok) setErr(lockMsg || "Incorrect password.");
+    const result = await login(pw);
+    if (result !== true) setErr(typeof result === "string" ? result : "Incorrect password.");
     setLoading(false);
   };
   return (
