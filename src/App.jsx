@@ -1,110 +1,46 @@
-import { useState, useEffect, useCallback, useRef, memo } from "react";
+import { useState, useEffect, useCallback, useRef, memo, useMemo } from "react";
 import { BrowserRouter, Routes, Route, Link, useLocation, Navigate } from "react-router-dom";
+import { useQuery, useMutation, anyApi } from "convex/react";
 
-/* ═══════════════════════════════════════════════
-   SUPABASE — REST + STORAGE
-═══════════════════════════════════════════════ */
+const api = {
+  cms: {
+    listPosts:          anyApi.cms.listPosts,
+    listCaseStudies:    anyApi.cms.listCaseStudies,
+    createPost:         anyApi.cms.createPost,
+    updatePost:         anyApi.cms.updatePost,
+    deletePost:         anyApi.cms.deletePost,
+    createCaseStudy:    anyApi.cms.createCaseStudy,
+    updateCaseStudy:    anyApi.cms.updateCaseStudy,
+    deleteCaseStudy:    anyApi.cms.deleteCaseStudy,
+  },
+  leads: {
+    listLeads:              anyApi.leads.listLeads,
+    createLead:             anyApi.leads.createLead,
+    updateLead:             anyApi.leads.updateLead,
+    deleteLead:             anyApi.leads.deleteLead,
+    convertLeadToClient:    anyApi.leads.convertLeadToClient,
+  },
+  clients: {
+    listClients:    anyApi.clients.listClients,
+    createClient:   anyApi.clients.createClient,
+    updateClient:   anyApi.clients.updateClient,
+    deleteClient:   anyApi.clients.deleteClient,
+  },
+};
+
 const LOGO_WHITE = "/logo-white.svg";
-
-const SB_URL = import.meta.env.VITE_SUPABASE_URL || "";
-const SB_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
-const BUCKET = "media";
-
-const H_JSON = { "apikey": SB_KEY, "Authorization": `Bearer ${SB_KEY}`, "Content-Type": "application/json", "Prefer": "return=representation" };
-const H_AUTH = { "apikey": SB_KEY, "Authorization": `Bearer ${SB_KEY}` };
-
-async function sbFetch(table, opts = {}) {
-  const { method = "GET", query = "", body } = opts;
-  const url = `${SB_URL}/rest/v1/${table}${query ? "?" + query : ""}`;
-  const r = await fetch(url, { method, headers: H_JSON, body: body ? JSON.stringify(body) : undefined });
-  if (!r.ok) { const e = await r.text(); throw new Error(e); }
-  if (method === "DELETE") return true;
-  const text = await r.text();
-  return text ? JSON.parse(text) : [];
-}
-
-async function storageUpload(file) {
-  const ext  = file.name.split(".").pop();
-  const name = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
-  const r = await fetch(`${SB_URL}/storage/v1/object/${BUCKET}/${name}`, {
-    method: "POST", headers: { ...H_AUTH, "Content-Type": file.type }, body: file,
-  });
-  if (!r.ok) { const e = await r.text(); throw new Error(e); }
-  return `${SB_URL}/storage/v1/object/public/${BUCKET}/${name}`;
-}
-
-async function storageList() {
-  const r = await fetch(`${SB_URL}/storage/v1/object/list/${BUCKET}`, {
-    method: "POST", headers: { ...H_AUTH, "Content-Type": "application/json" },
-    body: JSON.stringify({ limit: 200, offset: 0, sortBy: { column: "created_at", order: "desc" } }),
-  });
-  if (!r.ok) throw new Error(await r.text());
-  const items = await r.json();
-  return items.map(f => ({
-    name: f.name,
-    url: `${SB_URL}/storage/v1/object/public/${BUCKET}/${f.name}`,
-    size: f.metadata?.size || 0,
-    type: f.metadata?.mimetype || "",
-    created: f.created_at,
-  }));
-}
-
-async function storageDelete(name) {
-  const r = await fetch(`${SB_URL}/storage/v1/object/${BUCKET}`, {
-    method: "DELETE", headers: { ...H_AUTH, "Content-Type": "application/json" },
-    body: JSON.stringify({ prefixes: [name] }),
-  });
-  if (!r.ok) throw new Error(await r.text());
-  return true;
-}
-
-/* ═══════════════════════════════════════════════
-   SLUG HELPER
-═══════════════════════════════════════════════ */
-function sanitizeText(str, maxLen = 500) {
-  if (typeof str !== "string") return "";
-  return str.replace(/<[^>]*>/g, "").slice(0, maxLen);
-}
-
-function slugify(str) {
-  return str
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .slice(0, 80);
-}
+const CONVEX_STORAGE_URL = import.meta.env.VITE_CONVEX_URL?.replace(".cloud", ".cloud") || "";
 
 /* ═══════════════════════════════════════════════
    AUTH
 ═══════════════════════════════════════════════ */
-// Admin password hash from env var — never hardcode passwords in source
-// Generate: node -e "require('crypto').createHash('sha256').update('yourpass').digest('hex')"
-const ADMIN_PW_HASH = import.meta.env.VITE_ADMIN_PW_HASH || "15f56c7170340b82f356b2b140a0d3226eb6eeea72a44681dadef240b5a482df"; // sha256('1204admin2026')
+const ADMIN_PW_HASH = import.meta.env.VITE_ADMIN_PW_HASH || "15f56c7170340b82f356b2b140a0d3226eb6eeea72a44681dadef240b5a482df";
 const AUTH_KEY = "1204_admin_auth";
-
-// ── SECURE AUTH HOOK ─────────────────────────────────────────────
 const _adminLogin = { count: 0, firstAt: 0, lockUntil: 0 };
-const ADMIN_MAX = 5, ADMIN_WIN = 15*60*1000, ADMIN_LOCK = 15*60*1000;
 
 async function hashPassword(pw) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pw));
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,"0")).join("");
-}
-
-function checkAdminRateLimit() {
-  const now = Date.now();
-  if (now < _adminLogin.lockUntil) {
-    const secs = Math.ceil((_adminLogin.lockUntil - now) / 1000);
-    return `Too many attempts. Try again in ${secs}s.`;
-  }
-  if (now - _adminLogin.firstAt > ADMIN_WIN) { _adminLogin.count = 0; _adminLogin.firstAt = now; }
-  if (_adminLogin.count >= ADMIN_MAX) {
-    _adminLogin.lockUntil = now + ADMIN_LOCK; _adminLogin.count = 0;
-    return "Locked for 15 minutes due to too many failed attempts.";
-  }
-  return null;
 }
 
 function useAuth() {
@@ -118,27 +54,48 @@ function useAuth() {
       return valid;
     } catch { sessionStorage.removeItem(AUTH_KEY); return false; }
   });
-
   const [lockMsg, setLockMsg] = useState("");
 
   const login = async (pw) => {
-    const rateLimited = checkAdminRateLimit();
-    if (rateLimited) { setLockMsg(rateLimited); return false; }
+    const now = Date.now();
+    if (now < _adminLogin.lockUntil) {
+      setLockMsg(`Too many attempts. Wait ${Math.ceil((_adminLogin.lockUntil-now)/1000)}s.`);
+      return false;
+    }
+    if (now - _adminLogin.firstAt > 15*60*1000) { _adminLogin.count=0; _adminLogin.firstAt=now; }
+    if (_adminLogin.count >= 5) {
+      _adminLogin.lockUntil = now + 15*60*1000; _adminLogin.count = 0;
+      setLockMsg("Locked for 15 minutes."); return false;
+    }
     _adminLogin.count++;
     const hash = await hashPassword(pw);
     if (hash === ADMIN_PW_HASH) {
       _adminLogin.count = 0; _adminLogin.lockUntil = 0; setLockMsg("");
       sessionStorage.setItem(AUTH_KEY, JSON.stringify({ ts: Date.now() }));
-      setAuthed(true);
-      return true;
+      setAuthed(true); return true;
     }
-    setLockMsg(`Incorrect password. ${ADMIN_MAX - _adminLogin.count} attempt(s) remaining.`);
+    setLockMsg(`Incorrect password. ${5 - _adminLogin.count} attempt(s) remaining.`);
     return false;
   };
-
   const logout = () => { sessionStorage.removeItem(AUTH_KEY); setAuthed(false); };
   return { authed, login, logout, lockMsg };
 }
+
+/* ═══════════════════════════════════════════════
+   HELPERS
+═══════════════════════════════════════════════ */
+function slugify(str) {
+  return str.toLowerCase().trim().replace(/[^a-z0-9\s-]/g,"").replace(/\s+/g,"-").replace(/-+/g,"-").slice(0,80);
+}
+function fmtDate(ts) {
+  if (!ts) return "";
+  return new Date(ts).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"});
+}
+const SCORE_COLOR = s => s >= 70 ? "#22c55e" : s >= 40 ? "#eab308" : "#ef4444";
+const STATUS_COLORS = {
+  new:"#3b82f6", contacted:"#a855f7", qualified:"#22c55e",
+  proposal_sent:"#eab308", won:"#22c55e", lost:"#ef4444",
+};
 
 /* ═══════════════════════════════════════════════
    TOAST
@@ -147,22 +104,17 @@ function Toast({ msg, type, onClose }) {
   useEffect(() => { const t = setTimeout(onClose, 3500); return () => clearTimeout(t); }, [onClose]);
   return (
     <div style={{
-      position:"fixed", bottom:24, right:24, zIndex:300, padding:"12px 20px", borderRadius:10,
-      fontSize:13, fontWeight:500, display:"flex", alignItems:"center", gap:10,
-      animation:"fadeUp .25s ease",
-      background: "var(--s2)",
-      color: type === "success" ? "var(--green)" : "#ef4444",
-      border: `1px solid ${type === "success" ? "rgba(34,197,94,.3)" : "rgba(239,68,68,.3)"}`,
-    }}>
-      {type === "success" ? "✓" : "✕"} {msg}
-    </div>
+      position:"fixed",bottom:24,right:24,zIndex:300,padding:"12px 20px",borderRadius:10,
+      fontSize:13,fontWeight:500,display:"flex",alignItems:"center",gap:10,animation:"fadeUp .25s ease",
+      background:"var(--s2)",color:type==="success"?"var(--green)":"#ef4444",
+      border:`1px solid ${type==="success"?"rgba(34,197,94,.3)":"rgba(239,68,68,.3)"}`,
+    }}>{type==="success"?"✓":"✕"} {msg}</div>
   );
 }
-
 function useToast() {
   const [toast, setToast] = useState(null);
-  const show = useCallback((msg, type = "success") => setToast({ msg, type, key: Date.now() }), []);
-  const el   = toast ? <Toast key={toast.key} msg={toast.msg} type={toast.type} onClose={() => setToast(null)} /> : null;
+  const show = useCallback((msg, type="success") => setToast({msg,type,key:Date.now()}),[]);
+  const el = toast ? <Toast key={toast.key} msg={toast.msg} type={toast.type} onClose={()=>setToast(null)} /> : null;
   return { show, el };
 }
 
@@ -183,24 +135,21 @@ const Styles = memo(() => (
       --display:-apple-system,'SF Pro Display',BlinkMacSystemFont,'Helvetica Neue',sans-serif;
     }
     html,body,#root{height:100%;}
-    body{background:var(--bg);color:var(--text);font-family:var(--font,-apple-system,'SF Pro Text',BlinkMacSystemFont,'Helvetica Neue',sans-serif);-webkit-font-smoothing:antialiased;overflow-x:hidden;}
-    a{text-decoration:none;color:inherit;}
-    button{cursor:pointer;font-family:inherit;}
+    body{background:var(--bg);color:var(--text);font-family:var(--font);-webkit-font-smoothing:antialiased;overflow-x:hidden;}
+    a{text-decoration:none;color:inherit;}button{cursor:pointer;font-family:inherit;}
     input,textarea,select{font-family:inherit;}
-    ::-webkit-scrollbar{width:3px;height:3px;}
-    ::-webkit-scrollbar-thumb{background:var(--bd2);border-radius:3px;}
+    ::-webkit-scrollbar{width:3px;height:3px;}::-webkit-scrollbar-thumb{background:var(--bd2);border-radius:3px;}
 
     .btn{display:inline-flex;align-items:center;gap:7px;padding:9px 18px;font-size:13px;font-weight:600;border:none;border-radius:8px;cursor:pointer;letter-spacing:-.01em;transition:all .15s;white-space:nowrap;}
     .btn-primary{background:var(--pink);color:#fff;border:1px solid var(--pink);}.btn-primary:hover{opacity:.88;}.btn-primary:disabled{opacity:.5;cursor:default;}
     .btn-ghost{background:rgba(255,255,255,.05);color:var(--dim);border:1px solid var(--bd2);}.btn-ghost:hover{background:rgba(255,255,255,.08);color:var(--text);}
     .btn-danger{background:rgba(239,68,68,.1);color:#ef4444;border:1px solid rgba(239,68,68,.2);}.btn-danger:hover{background:rgba(239,68,68,.18);}
-    .btn-sm{padding:6px 13px;font-size:12px;border-radius:6px;}
-    .btn-xs{padding:3px 9px;font-size:11px;border-radius:5px;}
+    .btn-success{background:rgba(34,197,94,.1);color:var(--green);border:1px solid rgba(34,197,94,.25);}
+    .btn-sm{padding:6px 13px;font-size:12px;border-radius:6px;}.btn-xs{padding:3px 9px;font-size:11px;border-radius:5px;}
 
     .card{background:var(--s1);border:1px solid var(--bd);border-radius:12px;}
     .input{width:100%;padding:10px 13px;background:var(--s2);border:1px solid var(--bd2);border-radius:8px;color:var(--text);font-size:13.5px;outline:none;transition:border-color .15s;}
-    .input:focus{border-color:var(--pink);}
-    .input::placeholder{color:var(--muted);}
+    .input:focus{border-color:var(--pink);}.input::placeholder{color:var(--muted);}
     textarea.input{resize:vertical;min-height:90px;line-height:1.7;}
     select.input{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2 4l4 4 4-4' stroke='%23888' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:32px;}
     .lbl{font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);}
@@ -208,13 +157,13 @@ const Styles = memo(() => (
     .badge{display:inline-flex;align-items:center;padding:3px 9px;border-radius:100px;font-size:10.5px;font-weight:700;white-space:nowrap;}
     .badge-green{background:rgba(34,197,94,.1);color:var(--green);border:1px solid rgba(34,197,94,.25);}
     .badge-pink{background:rgba(255,45,120,.1);color:var(--pink);border:1px solid rgba(255,45,120,.25);}
+    .badge-blue{background:rgba(59,130,246,.1);color:var(--blue);border:1px solid rgba(59,130,246,.25);}
     .badge-dim{background:rgba(255,255,255,.06);color:var(--dim);border:1px solid var(--bd2);}
 
     .table{width:100%;border-collapse:collapse;}
     .table th{font-size:10.5px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);padding:10px 16px;text-align:left;border-bottom:1px solid var(--bd);white-space:nowrap;}
     .table td{padding:13px 16px;border-bottom:1px solid var(--bd);font-size:13.5px;vertical-align:middle;}
-    .table tr:last-child td{border-bottom:none;}
-    .table tr:hover td{background:var(--hover);}
+    .table tr:last-child td{border-bottom:none;}.table tr:hover td{background:var(--hover);}
 
     .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.8);backdrop-filter:blur(8px);z-index:100;display:flex;align-items:center;justify-content:center;padding:20px;}
     .modal{background:var(--s1);border:1px solid var(--bd2);border-radius:16px;width:100%;max-width:700px;max-height:90vh;display:flex;flex-direction:column;}
@@ -223,8 +172,7 @@ const Styles = memo(() => (
     .modal-foot{padding:18px 26px;border-top:1px solid var(--bd);display:flex;justify-content:flex-end;gap:10px;flex-shrink:0;}
 
     .sl{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:7px;font-size:13px;font-weight:500;color:var(--dim);margin-bottom:1px;transition:all .15s;user-select:none;}
-    .sl:hover{background:rgba(255,255,255,.04);color:var(--text);}
-    .sl.active{background:rgba(255,45,120,.1);color:var(--pink);}
+    .sl:hover{background:rgba(255,255,255,.04);color:var(--text);}.sl.active{background:rgba(255,45,120,.1);color:var(--pink);}
 
     .drop-zone{border:2px dashed var(--bd2);border-radius:12px;padding:36px 24px;text-align:center;cursor:pointer;}
     .drop-zone:hover,.drop-zone.drag{border-color:var(--pink);background:var(--pink-dim);}
@@ -235,42 +183,49 @@ const Styles = memo(() => (
     .ov{position:absolute;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;gap:6px;opacity:0;transition:opacity .2s;flex-wrap:wrap;padding:8px;}
     .media-thumb img,.media-thumb video{width:100%;height:100%;object-fit:cover;display:block;}
 
+    .pipeline-col{flex:1;min-width:180px;background:var(--s1);border:1px solid var(--bd);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px;}
+    .lead-card{background:var(--s2);border:1px solid var(--bd2);border-radius:8px;padding:12px 14px;cursor:pointer;transition:border-color .15s;}
+    .lead-card:hover{border-color:var(--bd3);}
+
+    .score-bar{height:4px;border-radius:2px;background:var(--bd2);overflow:hidden;margin-top:6px;}
+    .score-fill{height:100%;border-radius:2px;transition:width .3s;}
+
+    .checklist-item{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--bd);}
+    .checklist-item:last-child{border-bottom:none;}
+
     @keyframes fadeUp{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:translateY(0);}}
     .fade-up{animation:fadeUp .3s ease both;}
-    @keyframes spin{to{transform:rotate(360deg);}}
-    .spin{animation:spin .7s linear infinite;display:inline-block;}
+    @keyframes spin{to{transform:rotate(360deg);}}.spin{animation:spin .7s linear infinite;display:inline-block;}
   `}</style>
 ));
 
 /* ═══════════════════════════════════════════════
-   HELPERS
+   SHARED COMPONENTS
 ═══════════════════════════════════════════════ */
-function Loader({ label = "Loading…" }) {
+function Loader({ label="Loading…" }) {
   return (
-    <div style={{ padding:"72px 0", display:"flex", alignItems:"center", justifyContent:"center", gap:10, color:"var(--muted)", fontSize:13 }}>
-      <span className="spin" style={{ fontSize:18 }}>◌</span> {label}
+    <div style={{padding:"72px 0",display:"flex",alignItems:"center",justifyContent:"center",gap:10,color:"var(--muted)",fontSize:13}}>
+      <span className="spin" style={{fontSize:18}}>◌</span> {label}
     </div>
   );
 }
-
 function Empty({ icon, label, action }) {
   return (
-    <div style={{ padding:"60px 0", textAlign:"center", color:"var(--muted)" }}>
-      <div style={{ fontSize:36, marginBottom:12 }}>{icon}</div>
-      <p style={{ fontSize:14, marginBottom: action ? 20 : 0 }}>{label}</p>
+    <div style={{padding:"60px 0",textAlign:"center",color:"var(--muted)"}}>
+      <div style={{fontSize:36,marginBottom:12}}>{icon}</div>
+      <p style={{fontSize:14,marginBottom:action?20:0}}>{label}</p>
       {action}
     </div>
   );
 }
-
 function Confirm({ msg, onConfirm, onCancel }) {
   return (
     <div className="modal-bg" onClick={onCancel}>
-      <div className="card fade-up" style={{ maxWidth:360, padding:"32px 28px", textAlign:"center" }} onClick={e => e.stopPropagation()}>
-        <div style={{ fontSize:36, marginBottom:14 }}>⚠</div>
-        <p style={{ fontSize:14.5, fontWeight:600, color:"var(--text)", marginBottom:8 }}>Are you sure?</p>
-        <p style={{ fontSize:13, color:"var(--dim)", marginBottom:28 }}>{msg}</p>
-        <div style={{ display:"flex", gap:10, justifyContent:"center" }}>
+      <div className="card fade-up" style={{maxWidth:360,padding:"32px 28px",textAlign:"center"}} onClick={e=>e.stopPropagation()}>
+        <div style={{fontSize:36,marginBottom:14}}>⚠</div>
+        <p style={{fontSize:14.5,fontWeight:600,color:"var(--text)",marginBottom:8}}>Are you sure?</p>
+        <p style={{fontSize:13,color:"var(--dim)",marginBottom:28}}>{msg}</p>
+        <div style={{display:"flex",gap:10,justifyContent:"center"}}>
           <button onClick={onCancel} className="btn btn-ghost">Cancel</button>
           <button onClick={onConfirm} className="btn btn-danger">Delete</button>
         </div>
@@ -279,124 +234,21 @@ function Confirm({ msg, onConfirm, onCancel }) {
   );
 }
 
-const fmtSize = b => b > 1e6 ? `${(b/1e6).toFixed(1)}MB` : `${Math.round(b/1e3)}KB`;
-const isImage = f => f.type?.startsWith("image/");
-const isVideo = f => f.type?.startsWith("video/");
-const isGif   = f => f.type === "image/gif" || f.name?.endsWith(".gif");
-
 /* ═══════════════════════════════════════════════
-   MEDIA PICKER  (inside forms)
-═══════════════════════════════════════════════ */
-function MediaPicker({ onSelect, onClose }) {
-  const [files, setFiles]         = useState([]);
-  const [loading, setLoading]     = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const [progress, setProgress]   = useState(0);
-  const [drag, setDrag]           = useState(false);
-  const inputRef                  = useRef();
-  const { show, el: toastEl }     = useToast();
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try { setFiles(await storageList()); } catch { show("Could not load media","error"); }
-    setLoading(false);
-  }, [show]);
-
-  useEffect(() => { load(); }, [load]);
-
-  const ALLOWED_TYPES = ["image/jpeg","image/png","image/gif","image/webp","image/svg+xml","video/mp4","video/webm"];
-  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-  const upload = useCallback(async (fileList) => {
-    for (const file of fileList) {
-      if (!ALLOWED_TYPES.includes(file.type)) { show(`File type not allowed: ${file.name}`); return; }
-      if (file.size > MAX_FILE_SIZE) { show(`File too large (max 10MB): ${file.name}`); return; }
-    }
-    if (!fileList?.length) return;
-    setUploading(true); setProgress(10);
-    try {
-      for (let i = 0; i < fileList.length; i++) {
-        await storageUpload(fileList[i]);
-        setProgress(Math.round(((i+1)/fileList.length)*100));
-      }
-      show(`${fileList.length} file(s) uploaded`);
-      await load();
-    } catch(e) { show("Upload failed: "+e.message,"error"); }
-    setUploading(false); setProgress(0);
-  }, [load, show]);
-
-  const onDrop = e => { e.preventDefault(); setDrag(false); upload(e.dataTransfer.files); };
-
-  return (
-    <div className="modal-bg" onClick={onClose}>
-      <div className="modal" style={{ maxWidth:820 }} onClick={e => e.stopPropagation()}>
-        {toastEl}
-        <div className="modal-head">
-          <h2 style={{ fontSize:16, fontWeight:700, color:"var(--text)" }}>Media Library</h2>
-          <div style={{ display:"flex", gap:8 }}>
-            <button onClick={() => inputRef.current.click()} className="btn btn-primary btn-sm" disabled={uploading}>
-              {uploading ? <><span className="spin">◌</span> {progress}%</> : "↑ Upload"}
-            </button>
-            <button onClick={onClose} className="btn btn-ghost btn-sm">✕</button>
-          </div>
-        </div>
-        <div style={{ padding:"16px 26px 0" }}>
-          {uploading && (
-            <div style={{ height:3, background:"var(--bd)", borderRadius:2, marginBottom:12, overflow:"hidden" }}>
-              <div style={{ height:"100%", background:"var(--pink)", width:`${progress}%`, transition:"width .3s" }} />
-            </div>
-          )}
-          <div className={`drop-zone${drag?" drag":""}`} style={{ marginBottom:14, padding:"20px" }}
-            onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)}
-            onDrop={onDrop} onClick={()=>inputRef.current.click()}>
-            <p style={{ fontSize:13, color:"var(--dim)" }}>Drop files here or <span style={{color:"var(--pink)"}}>click to browse</span></p>
-            <p style={{ fontSize:11.5, color:"var(--muted)", marginTop:4 }}>Images · GIFs · Videos</p>
-          </div>
-          <input ref={inputRef} type="file" multiple accept="image/*,video/*,.gif" style={{display:"none"}} onChange={e=>upload(e.target.files)} />
-        </div>
-        <div className="modal-body" style={{ padding:"12px 26px 20px" }}>
-          {loading ? <Loader label="Loading media…" /> : files.length === 0 ? (
-            <Empty icon="🖼" label="No media yet. Upload files above." />
-          ) : (
-            <div className="media-grid">
-              {files.map(f => (
-                <div key={f.name} className="media-thumb" title={f.name}>
-                  {isVideo(f) ? <video src={f.url} muted /> : isImage(f) ? <img src={f.url} alt="" loading="lazy" /> : <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",fontSize:28}}>📄</div>}
-                  <div className="ov">
-                    <button className="btn btn-primary btn-xs" onClick={()=>onSelect(f.url)}>Select</button>
-                  </div>
-                  <div style={{ position:"absolute", bottom:0, left:0, right:0, padding:"3px 7px", background:"rgba(0,0,0,.75)", fontSize:10, color:"rgba(255,255,255,.6)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                    {fmtSize(f.size)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ═══════════════════════════════════════════════
-   IMAGE FIELD
+   IMAGE FIELD (uses URL input — Convex storage optional)
 ═══════════════════════════════════════════════ */
 function ImageField({ label, value, onChange }) {
-  const [picker, setPicker] = useState(false);
   return (
     <div>
-      <label className="lbl" style={{ display:"block", marginBottom:8 }}>{label}</label>
-      <div style={{ display:"flex", gap:8 }}>
-        <input className="input" placeholder="Paste URL or pick from library →" value={value||""} onChange={e=>onChange(e.target.value)} style={{flex:1}} />
-        <button type="button" onClick={()=>setPicker(true)} className="btn btn-ghost btn-sm" style={{flexShrink:0}}>🖼 Library</button>
-      </div>
+      <label className="lbl" style={{display:"block",marginBottom:8}}>{label}</label>
+      <input className="input" placeholder="Paste image URL…" value={value||""} onChange={e=>onChange(e.target.value)} />
       {value && (
-        <div style={{ marginTop:10, borderRadius:8, overflow:"hidden", border:"1px solid var(--bd)", maxHeight:160, display:"flex", background:"var(--s2)" }}>
+        <div style={{marginTop:10,borderRadius:8,overflow:"hidden",border:"1px solid var(--bd)",maxHeight:160,display:"flex",background:"var(--s2)"}}>
           {value.match(/\.(mp4|mov|webm)/i)
             ? <video src={value} controls style={{maxHeight:160,maxWidth:"100%",margin:"auto"}} />
             : <img src={value} alt="" style={{maxHeight:160,maxWidth:"100%",objectFit:"cover",display:"block"}} />}
         </div>
       )}
-      {picker && <MediaPicker onSelect={url=>{onChange(url);setPicker(false);}} onClose={()=>setPicker(false)} />}
     </div>
   );
 }
@@ -405,52 +257,40 @@ function ImageField({ label, value, onChange }) {
    SIDEBAR
 ═══════════════════════════════════════════════ */
 const NAV = [
-  { path:"/",          icon:<svg width="15" height="15" viewBox="0 0 15 15" fill="none"><rect x="1" y="1" width="5.5" height="5.5" rx="1.2" fill="currentColor" opacity=".9"/><rect x="8.5" y="1" width="5.5" height="5.5" rx="1.2" fill="currentColor" opacity=".5"/><rect x="1" y="8.5" width="5.5" height="5.5" rx="1.2" fill="currentColor" opacity=".5"/><rect x="8.5" y="8.5" width="5.5" height="5.5" rx="1.2" fill="currentColor" opacity=".5"/></svg>, label:"Dashboard"    },
-  { path:"/blog",      icon:<svg width="15" height="15" viewBox="0 0 15 15" fill="none"><rect x="1.5" y="1" width="10" height="13" rx="1.5" stroke="currentColor" strokeWidth="1.3"/><line x1="4" y1="5" x2="9.5" y2="5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/><line x1="4" y1="7.5" x2="9.5" y2="7.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/><line x1="4" y1="10" x2="7" y2="10" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/></svg>, label:"Blog Posts"    },
-  { path:"/portfolio", icon:<svg width="15" height="15" viewBox="0 0 15 15" fill="none"><rect x="1" y="3" width="13" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.3"/><path d="M5 3V2.5a.5.5 0 01.5-.5h4a.5.5 0 01.5.5V3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/><line x1="4" y1="7.5" x2="11" y2="7.5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/><line x1="4" y1="10" x2="8.5" y2="10" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round"/></svg>, label:"Portfolio"     },
-  { path:"/media",     icon:<svg width="15" height="15" viewBox="0 0 15 15" fill="none"><rect x="1" y="1" width="13" height="13" rx="2" stroke="currentColor" strokeWidth="1.3"/><circle cx="5.5" cy="5.5" r="1.2" stroke="currentColor" strokeWidth="1.1"/><path d="M1 10l3.5-3.5 2.5 2.5 2-2 4 4" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round"/></svg>, label:"Media Library" },
+  { path:"/",           label:"Dashboard",     icon:"▣" },
+  { path:"/leads",      label:"Lead Pipeline", icon:"◎" },
+  { path:"/clients",    label:"Clients",       icon:"◈" },
+  { path:"/blog",       label:"Blog Posts",    icon:"✍" },
+  { path:"/portfolio",  label:"Portfolio",     icon:"◆" },
+  { path:"/media",      label:"Media",         icon:"🖼" },
 ];
 
 function Sidebar({ logout }) {
   const { pathname } = useLocation();
   return (
-    <aside style={{ width:220, flexShrink:0, background:"var(--s1)", borderRight:"1px solid var(--bd)", display:"flex", flexDirection:"column", height:"100vh", overflow:"hidden" }}>
-
-      {/* Logo */}
-      <div style={{ padding:"16px 16px 12px", borderBottom:"1px solid var(--bd)" }}>
-        <Link to="/" style={{ display:"block" }}>
-          <img src={LOGO_WHITE}
-              alt="1204Studios" style={{ height:26, width:"auto", display:"block" }}
-          />
-        </Link>
-        <p style={{ fontSize:10, color:"var(--muted)", marginTop:3, letterSpacing:"1px", textTransform:"uppercase", fontWeight:700 }}>Content Management System</p>
+    <aside style={{width:220,flexShrink:0,background:"var(--s1)",borderRight:"1px solid var(--bd)",display:"flex",flexDirection:"column",height:"100vh",overflow:"hidden"}}>
+      <div style={{padding:"16px 16px 12px",borderBottom:"1px solid var(--bd)"}}>
+        <Link to="/"><img src={LOGO_WHITE} alt="1204Studios" style={{height:26,width:"auto",display:"block"}} /></Link>
+        <p style={{fontSize:10,color:"var(--muted)",marginTop:3,letterSpacing:"1px",textTransform:"uppercase",fontWeight:700}}>Admin</p>
       </div>
-
-      {/* Nav */}
-      <nav style={{ padding:"8px 8px", flex:1, overflowY:"auto" }}>
-        <div style={{ fontSize:"9.5px", fontWeight:700, letterSpacing:"2px", textTransform:"uppercase", color:"var(--muted)", padding:"12px 12px 6px" }}>Content</div>
-        {NAV.map(n => (
+      <nav style={{padding:"8px",flex:1,overflowY:"auto"}}>
+        <div style={{fontSize:"9.5px",fontWeight:700,letterSpacing:"2px",textTransform:"uppercase",color:"var(--muted)",padding:"12px 12px 6px"}}>CRM</div>
+        {NAV.slice(0,3).map(n=>(
           <Link key={n.path} to={n.path} className={`sl${pathname===n.path?" active":""}`}>
-            <span style={{ width:18, height:18, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>{n.icon}</span>
-            {n.label}
+            <span style={{fontSize:14}}>{n.icon}</span>{n.label}
+          </Link>
+        ))}
+        <div style={{fontSize:"9.5px",fontWeight:700,letterSpacing:"2px",textTransform:"uppercase",color:"var(--muted)",padding:"16px 12px 6px"}}>Content</div>
+        {NAV.slice(3).map(n=>(
+          <Link key={n.path} to={n.path} className={`sl${pathname===n.path?" active":""}`}>
+            <span style={{fontSize:14}}>{n.icon}</span>{n.label}
           </Link>
         ))}
       </nav>
-
-      {/* Footer */}
-      <div style={{ padding:"12px 8px", borderTop:"1px solid var(--bd)" }}>
-        <a href="https://1204studios.com" target="_blank" rel="noreferrer" className="sl" style={{ textDecoration:"none", marginBottom:1 }}>
-          <span style={{ width:18, display:"flex", alignItems:"center", justifyContent:"center" }}>
-            <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M5 2H2a1 1 0 00-1 1v8a1 1 0 001 1h8a1 1 0 001-1V8M8 1h4m0 0v4m0-4L5.5 7.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>
-          </span>
-          Live Site
-        </a>
-        <button onClick={logout} className="sl" style={{ width:"100%", background:"none", border:"none", color:"var(--dim)", textAlign:"left" }}
-          onMouseOver={e=>e.currentTarget.style.color="var(--red)"} onMouseOut={e=>e.currentTarget.style.color="var(--dim)"}>
-          <span style={{ width:18, display:"flex", alignItems:"center", justifyContent:"center" }}>
-            <svg width="13" height="13" viewBox="0 0 12 12" fill="none"><path d="M4.5 2H2a1 1 0 00-1 1v6a1 1 0 001 1h2.5M8 8.5L11 6 8 3.5M11 6H4.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>
-          </span>
-          Sign Out
+      <div style={{padding:"12px 8px",borderTop:"1px solid var(--bd)"}}>
+        <a href="https://1204studios.com" target="_blank" rel="noreferrer" className="sl">↗ Live Site</a>
+        <button onClick={logout} className="sl" style={{width:"100%",background:"none",border:"none",color:"var(--dim)",textAlign:"left"}}>
+          → Sign Out
         </button>
       </div>
     </aside>
@@ -460,36 +300,35 @@ function Sidebar({ logout }) {
 /* ═══════════════════════════════════════════════
    LOGIN
 ═══════════════════════════════════════════════ */
-function Login({ login }) {
+function Login({ login, lockMsg }) {
   const [pw, setPw]         = useState("");
   const [err, setErr]       = useState("");
   const [loading, setLoading] = useState(false);
   const submit = async () => {
     setLoading(true); setErr("");
-    await new Promise(r => setTimeout(r,400));
     const ok = await login(pw);
     if (!ok) setErr(lockMsg || "Incorrect password.");
     setLoading(false);
   };
   return (
-    <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", background:"var(--bg)" }}>
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg)"}}>
       <Styles />
-      <div className="card fade-up" style={{ width:"100%", maxWidth:380, padding:"44px 36px" }}>
-        <div style={{ marginBottom:32, textAlign:"center" }}>
-          <div style={{ display:"flex", justifyContent:"center", marginBottom:12 }}>
-            <img src={LOGO_WHITE} alt="1204Studios" style={{ height:30, width:"auto", display:"block" }}/>
+      <div className="card fade-up" style={{width:"100%",maxWidth:380,padding:"44px 36px"}}>
+        <div style={{marginBottom:32,textAlign:"center"}}>
+          <div style={{display:"flex",justifyContent:"center",marginBottom:12}}>
+            <img src={LOGO_WHITE} alt="1204Studios" style={{height:30,width:"auto",display:"block"}} />
           </div>
-          <p style={{ fontSize:13.5, color:"var(--dim)" }}>Sign in to your CMS</p>
+          <p style={{fontSize:13.5,color:"var(--dim)"}}>Sign in to CMS & CRM</p>
         </div>
-        <label className="lbl" style={{ display:"block", marginBottom:8 }}>Password</label>
+        <label className="lbl" style={{display:"block",marginBottom:8}}>Password</label>
         <input type="password" className="input" placeholder="Admin password" value={pw}
           onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} autoFocus
-          style={{ marginBottom: err?6:16 }} />
-        {err && <p style={{ fontSize:12, color:"#f87171", marginBottom:14 }}>{err}</p>}
-        <button onClick={submit} disabled={loading} className="btn btn-primary" style={{ width:"100%", justifyContent:"center", padding:"12px" }}>
+          style={{marginBottom:err?6:16}} />
+        {err && <p style={{fontSize:12,color:"#f87171",marginBottom:14}}>{err}</p>}
+        <button onClick={submit} disabled={loading} className="btn btn-primary" style={{width:"100%",justifyContent:"center",padding:"12px"}}>
           {loading ? <span className="spin">◌</span> : "Sign In →"}
         </button>
-        <p style={{ fontSize:11, color:"var(--muted)", textAlign:"center", marginTop:20 }}>cms.1204studios.com · Restricted Access</p>
+        <p style={{fontSize:11,color:"var(--muted)",textAlign:"center",marginTop:20}}>Restricted Access</p>
       </div>
     </div>
   );
@@ -499,56 +338,346 @@ function Login({ login }) {
    DASHBOARD
 ═══════════════════════════════════════════════ */
 function Dashboard() {
-  const [stats, setStats]   = useState({ blog:0, portfolio:0, media:0, fb:0, fcs:0 });
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    async function load() {
-      try {
-        const [bp, cs, med] = await Promise.all([
-          sbFetch("blog_posts",   { query:"select=id,featured" }),
-          sbFetch("case_studies", { query:"select=id,featured" }),
-          storageList(),
-        ]);
-        setStats({ blog:bp.length, portfolio:cs.length, media:med.length, fb:bp.filter(b=>b.featured).length, fcs:cs.filter(c=>c.featured).length });
-      } catch {}
-      setLoading(false);
-    }
-    load();
-  }, []);
+  const posts       = useQuery(api.cms.listPosts)         || [];
+  const caseStudies = useQuery(api.cms.listCaseStudies)   || [];
+  const leads       = useQuery(api.leads.listLeads)       || [];
+  const clients     = useQuery(api.clients.listClients)   || [];
 
-  const cards = [
-    { label:"Blog Posts",     value:stats.blog,     sub:`${stats.fb} featured`,  icon:"✍",  color:"#ff2d78", to:"/blog"      },
-    { label:"Portfolio Items",value:stats.portfolio, sub:`${stats.fcs} featured`, icon:"◈",  color:"#FFDE21", to:"/portfolio" },
-    { label:"Media Files",    value:stats.media,     sub:"in Supabase Storage",   icon:"🖼", color:"#3b82f6", to:"/media"     },
+  const newLeads  = leads.filter(l=>l.status==="new").length;
+  const hotLeads  = leads.filter(l=>l.score>=70).length;
+  const wonLeads  = leads.filter(l=>l.status==="won").length;
+
+  const stats = [
+    { label:"Total Leads",    value:leads.length,      sub:`${newLeads} new · ${hotLeads} hot`,  icon:"◎", color:"var(--blue)",   to:"/leads"     },
+    { label:"Active Clients", value:clients.length,    sub:`${wonLeads} converted`,               icon:"◈", color:"var(--green)",  to:"/clients"   },
+    { label:"Blog Posts",     value:posts.length,      sub:`${posts.filter(p=>p.featured).length} featured`, icon:"✍", color:"var(--pink)", to:"/blog" },
+    { label:"Case Studies",   value:caseStudies.length,sub:`${caseStudies.filter(c=>c.featured).length} featured`, icon:"◆", color:"var(--yellow)", to:"/portfolio" },
   ];
 
   return (
-    <div style={{ padding:"24px 32px 48px" }}>
-      <div style={{ marginBottom:40 }}>
-        <h1 style={{ fontSize:22, fontWeight:700, color:"var(--text)", letterSpacing:"-.02em", fontFamily:"var(--display,-apple-system,'SF Pro Display',BlinkMacSystemFont,sans-serif)", marginBottom:5 }}>Dashboard</h1>
-        <p style={{ fontSize:13.5, color:"var(--dim)" }}>Welcome back. Here's your content overview.</p>
+    <div style={{padding:"24px 32px 48px"}}>
+      <div style={{marginBottom:32}}>
+        <h1 style={{fontSize:22,fontWeight:700,color:"var(--text)",letterSpacing:"-.02em",fontFamily:"var(--display)",marginBottom:5}}>Dashboard</h1>
+        <p style={{fontSize:13.5,color:"var(--dim)"}}>Overview of your CRM and content.</p>
       </div>
-      {loading ? <Loader /> : (
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))", gap:14, marginBottom:40 }}>
-          {cards.map(c => (
-            <Link key={c.label} to={c.to} className="card" style={{ padding:"26px 22px", display:"block" }}
-              onMouseOver={e=>e.currentTarget.style.borderColor="var(--bd2)"}
-              onMouseOut={e=>e.currentTarget.style.borderColor="var(--bd)"}>
-              <div style={{ width:42, height:42, borderRadius:10, background:`${c.color}18`, border:`1px solid ${c.color}28`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:20, marginBottom:18 }}>{c.icon}</div>
-              <div style={{ fontSize:34, fontWeight:700, color:"var(--text)", fontFamily:"var(--display,-apple-system,'SF Pro Display',BlinkMacSystemFont,sans-serif)", letterSpacing:"-.02em", marginBottom:4 }}>{c.value}</div>
-              <div style={{ fontSize:13, fontWeight:600, color:"var(--text)", marginBottom:3 }}>{c.label}</div>
-              <div style={{ fontSize:12, color:"var(--muted)" }}>{c.sub}</div>
-            </Link>
-          ))}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))",gap:14,marginBottom:32}}>
+        {stats.map(c=>(
+          <Link key={c.label} to={c.to} className="card" style={{padding:"26px 22px",display:"block"}}>
+            <div style={{width:40,height:40,borderRadius:10,background:`${c.color}18`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,marginBottom:16}}>{c.icon}</div>
+            <div style={{fontSize:32,fontWeight:700,color:"var(--text)",fontFamily:"var(--display)",letterSpacing:"-.02em",marginBottom:4}}>{c.value}</div>
+            <div style={{fontSize:13,fontWeight:600,color:"var(--text)",marginBottom:3}}>{c.label}</div>
+            <div style={{fontSize:12,color:"var(--muted)"}}>{c.sub}</div>
+          </Link>
+        ))}
+      </div>
+      {/* Recent leads */}
+      <div className="card" style={{padding:"20px 24px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <p style={{fontSize:14,fontWeight:600,color:"var(--text)"}}>Recent Leads</p>
+          <Link to="/leads" className="btn btn-ghost btn-sm">View All →</Link>
         </div>
+        {leads.slice(0,5).map(l=>(
+          <div key={l._id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"1px solid var(--bd)"}}>
+            <div>
+              <div style={{fontSize:13.5,fontWeight:600,color:"var(--text)"}}>{l.name}</div>
+              <div style={{fontSize:12,color:"var(--muted)"}}>{l.company||l.email||""}</div>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:11,fontWeight:700,color:SCORE_COLOR(l.score)}}>{l.score}pts</span>
+              <span className="badge" style={{background:`${STATUS_COLORS[l.status]||"#888"}18`,color:STATUS_COLORS[l.status]||"#888",border:`1px solid ${STATUS_COLORS[l.status]||"#888"}30`}}>{l.status?.replace("_"," ")}</span>
+            </div>
+          </div>
+        ))}
+        {leads.length===0 && <p style={{fontSize:13,color:"var(--muted)",padding:"20px 0",textAlign:"center"}}>No leads yet. They'll appear here when the website form is submitted.</p>}
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════
+   LEAD PIPELINE
+═══════════════════════════════════════════════ */
+const PIPELINE_STAGES = [
+  { key:"new",           label:"New",            color:"#3b82f6" },
+  { key:"contacted",     label:"Contacted",      color:"#a855f7" },
+  { key:"qualified",     label:"Qualified",      color:"#f59e0b" },
+  { key:"proposal_sent", label:"Proposal Sent",  color:"#f97316" },
+  { key:"won",           label:"Won",            color:"#22c55e" },
+  { key:"lost",          label:"Lost",           color:"#ef4444" },
+];
+
+function LeadPipeline() {
+  const leads         = useQuery(api.leads.listLeads) || [];
+  const updateLead    = useMutation(api.leads.updateLead);
+  const convertLead   = useMutation(api.leads.convertLeadToClient);
+  const deleteLead    = useMutation(api.leads.deleteLead);
+  const createLead    = useMutation(api.leads.createLead);
+  const [modal, setModal]   = useState(null);
+  const [confirm, setConfirm] = useState(null);
+  const { show, el:toastEl } = useToast();
+
+  const byStage = useMemo(()=>{
+    const m = {};
+    PIPELINE_STAGES.forEach(s=>{ m[s.key]=[]; });
+    leads.forEach(l=>{ if(m[l.status]) m[l.status].push(l); });
+    return m;
+  },[leads]);
+
+  const handleStatusChange = async (id, status) => {
+    try { await updateLead({id, status}); show("Status updated"); }
+    catch(e) { show("Failed: "+e.message,"error"); }
+  };
+
+  const handleConvert = async (lead) => {
+    try {
+      await convertLead({ leadId: lead._id, name: lead.name, company: lead.company, email: lead.email, phone: lead.phone });
+      show("Lead converted to client");
+    } catch(e) { show("Failed: "+e.message,"error"); }
+  };
+
+  const handleDelete = async (id) => {
+    try { await deleteLead({id}); show("Lead deleted"); setConfirm(null); }
+    catch(e) { show("Failed","error"); }
+  };
+
+  return (
+    <div style={{padding:"24px 32px 48px"}}>
+      {toastEl}
+      {confirm && <Confirm msg="Delete this lead?" onConfirm={()=>handleDelete(confirm)} onCancel={()=>setConfirm(null)} />}
+      {modal && <LeadModal lead={modal} onClose={()=>setModal(null)} onSave={async(data)=>{
+        try{
+          if(data._id) await updateLead({id:data._id,...data});
+          else await createLead(data);
+          show("Saved"); setModal(null);
+        } catch(e){show("Failed","error");}
+      }} />}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:24}}>
+        <div>
+          <h1 style={{fontSize:22,fontWeight:700,color:"var(--text)",letterSpacing:"-.02em",fontFamily:"var(--display)",marginBottom:5}}>Lead Pipeline</h1>
+          <p style={{fontSize:13.5,color:"var(--dim)"}}>{leads.length} leads total · {leads.filter(l=>l.score>=70).length} hot</p>
+        </div>
+        <button onClick={()=>setModal({name:"",email:"",phone:"",company:"",source:"direct",serviceInterest:"",message:"",budget:"",score:0,status:"new"})} className="btn btn-primary">+ Add Lead</button>
+      </div>
+      <div style={{display:"flex",gap:12,overflowX:"auto",paddingBottom:8}}>
+        {PIPELINE_STAGES.map(stage=>(
+          <div key={stage.key} className="pipeline-col">
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <span style={{fontSize:11,fontWeight:700,letterSpacing:"1.5px",textTransform:"uppercase",color:stage.color}}>{stage.label}</span>
+              <span style={{fontSize:12,color:"var(--muted)",fontWeight:600}}>{byStage[stage.key]?.length||0}</span>
+            </div>
+            {byStage[stage.key]?.map(lead=>(
+              <div key={lead._id} className="lead-card" onClick={()=>setModal(lead)}>
+                <div style={{fontSize:13,fontWeight:600,color:"var(--text)",marginBottom:2}}>{lead.name}</div>
+                {lead.company && <div style={{fontSize:12,color:"var(--muted)",marginBottom:4}}>{lead.company}</div>}
+                {lead.serviceInterest && <span className="badge badge-dim" style={{marginBottom:6}}>{lead.serviceInterest}</span>}
+                <div className="score-bar"><div className="score-fill" style={{width:`${lead.score}%`,background:SCORE_COLOR(lead.score)}} /></div>
+                <div style={{fontSize:10,color:SCORE_COLOR(lead.score),marginTop:3,fontWeight:700}}>{lead.score}% match</div>
+                <div style={{display:"flex",gap:4,marginTop:8,flexWrap:"wrap"}}>
+                  {stage.key!=="won" && stage.key!=="lost" && (
+                    <select value={lead.status} onClick={e=>e.stopPropagation()} onChange={e=>{e.stopPropagation();handleStatusChange(lead._id,e.target.value);}}
+                      className="input" style={{fontSize:11,padding:"3px 8px",height:26,flex:1}}>
+                      {PIPELINE_STAGES.map(s=><option key={s.key} value={s.key}>{s.label}</option>)}
+                    </select>
+                  )}
+                  {stage.key==="qualified" && (
+                    <button onClick={e=>{e.stopPropagation();handleConvert(lead);}} className="btn btn-success btn-xs" style={{flex:1}}>Convert</button>
+                  )}
+                  <button onClick={e=>{e.stopPropagation();setConfirm(lead._id);}} className="btn btn-danger btn-xs">✕</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LeadModal({ lead, onClose, onSave }) {
+  const [form, setForm] = useState(lead);
+  const [saving, setSaving] = useState(false);
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+  const submit = async () => {
+    setSaving(true);
+    await onSave(form);
+    setSaving(false);
+  };
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div className="modal-head">
+          <h2 style={{fontSize:16,fontWeight:700,color:"var(--text)"}}>{lead._id?"Edit Lead":"New Lead"}</h2>
+          <button onClick={onClose} className="btn btn-ghost btn-sm">✕</button>
+        </div>
+        <div className="modal-body">
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+            {[["name","Name",""],["email","Email",""],["phone","Phone",""],["company","Company",""]].map(([k,l,p])=>(
+              <div key={k}>
+                <label className="lbl" style={{display:"block",marginBottom:6}}>{l}</label>
+                <input className="input" placeholder={p||l} value={form[k]||""} onChange={e=>set(k,e.target.value)} />
+              </div>
+            ))}
+            <div>
+              <label className="lbl" style={{display:"block",marginBottom:6}}>Source</label>
+              <select className="input" value={form.source||"direct"} onChange={e=>set("source",e.target.value)}>
+                {["website","referral","linkedin","instagram","direct","email","event"].map(s=><option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="lbl" style={{display:"block",marginBottom:6}}>Service Interest</label>
+              <select className="input" value={form.serviceInterest||""} onChange={e=>set("serviceInterest",e.target.value)}>
+                <option value="">Select…</option>
+                {["Brand Design","Marketing","Print Media","Web / Digital","Tutoring","Strategy"].map(s=><option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="lbl" style={{display:"block",marginBottom:6}}>Budget</label>
+              <select className="input" value={form.budget||""} onChange={e=>set("budget",e.target.value)}>
+                <option value="">Select…</option>
+                {["₦100k–₦300k","₦300k–₦700k","₦700k–₦1.5M","₦1.5M+"].map(b=><option key={b} value={b}>{b}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="lbl" style={{display:"block",marginBottom:6}}>Status</label>
+              <select className="input" value={form.status||"new"} onChange={e=>set("status",e.target.value)}>
+                {PIPELINE_STAGES.map(s=><option key={s.key} value={s.key}>{s.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="lbl" style={{display:"block",marginBottom:6}}>Score (0-100)</label>
+              <input type="number" className="input" min="0" max="100" value={form.score||0} onChange={e=>set("score",+e.target.value)} />
+            </div>
+            <div>
+              <label className="lbl" style={{display:"block",marginBottom:6}}>Next Follow-Up</label>
+              <input type="date" className="input" value={form.nextFollowUp||""} onChange={e=>set("nextFollowUp",e.target.value)} />
+            </div>
+          </div>
+          <div>
+            <label className="lbl" style={{display:"block",marginBottom:6}}>Message / Notes</label>
+            <textarea className="input" value={form.message||form.notes||""} onChange={e=>set("notes",e.target.value)} style={{minHeight:80}} />
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button onClick={onClose} className="btn btn-ghost">Cancel</button>
+          <button onClick={submit} disabled={saving} className="btn btn-primary">
+            {saving?<><span className="spin">◌</span> Saving…</>:"Save Lead"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════
+   CLIENTS
+═══════════════════════════════════════════════ */
+function ClientsPage() {
+  const clients       = useQuery(api.clients.listClients)   || [];
+  const createClient  = useMutation(api.clients.createClient);
+  const updateClient  = useMutation(api.clients.updateClient);
+  const deleteClient  = useMutation(api.clients.deleteClient);
+  const [modal, setModal]     = useState(null);
+  const [confirm, setConfirm] = useState(null);
+  const { show, el:toastEl }  = useToast();
+
+  const EMPTY = {name:"",company:"",email:"",phone:"",address:"",notes:"",status:"active"};
+
+  const save = async (data) => {
+    try {
+      if(data._id) await updateClient({id:data._id,...data});
+      else await createClient(data);
+      show("Saved"); setModal(null);
+    } catch(e){ show("Failed","error"); }
+  };
+
+  const del = async (id) => {
+    try { await deleteClient({id}); show("Deleted"); setConfirm(null); }
+    catch { show("Failed","error"); }
+  };
+
+  return (
+    <div style={{padding:"24px 32px 48px"}}>
+      {toastEl}
+      {confirm && <Confirm msg="Delete this client?" onConfirm={()=>del(confirm)} onCancel={()=>setConfirm(null)} />}
+      {modal && (
+        <ClientModal client={modal} onClose={()=>setModal(null)} onSave={save} />
       )}
-      <div className="card" style={{ padding:"22px 26px" }}>
-        <p style={{ fontSize:13, fontWeight:600, color:"var(--text)", marginBottom:16 }}>Quick Actions</p>
-        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-          <Link to="/blog?new=1"      className="btn btn-primary btn-sm">+ New Blog Post</Link>
-          <Link to="/portfolio?new=1" className="btn btn-primary btn-sm">+ New Case Study</Link>
-          <Link to="/media"           className="btn btn-ghost btn-sm">↑ Upload Media</Link>
-          <a href="https://1204studios.com" target="_blank" rel="noreferrer" className="btn btn-ghost btn-sm">↗ View Live Site</a>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:28}}>
+        <div>
+          <h1 style={{fontSize:22,fontWeight:700,color:"var(--text)",letterSpacing:"-.02em",fontFamily:"var(--display)",marginBottom:5}}>Clients</h1>
+          <p style={{fontSize:13.5,color:"var(--dim)"}}>{clients.length} client{clients.length!==1?"s":""}</p>
+        </div>
+        <button onClick={()=>setModal({...EMPTY})} className="btn btn-primary">+ New Client</button>
+      </div>
+      <div className="card" style={{overflow:"hidden"}}>
+        {clients.length===0 ? <Empty icon="◈" label="No clients yet." /> : (
+          <table className="table">
+            <thead><tr><th>Name</th><th>Company</th><th>Email</th><th>Status</th><th>Added</th><th style={{textAlign:"right"}}>Actions</th></tr></thead>
+            <tbody>
+              {clients.map(c=>(
+                <tr key={c._id}>
+                  <td style={{fontWeight:600}}>{c.name}</td>
+                  <td style={{color:"var(--dim)"}}>{c.company||"—"}</td>
+                  <td style={{color:"var(--dim)",fontSize:13}}>{c.email||"—"}</td>
+                  <td><span className={`badge ${c.status==="active"?"badge-green":"badge-dim"}`}>{c.status}</span></td>
+                  <td style={{color:"var(--muted)",fontSize:12}}>{fmtDate(c._creationTime)}</td>
+                  <td>
+                    <div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
+                      <button onClick={()=>setModal(c)} className="btn btn-ghost btn-sm">Edit</button>
+                      <button onClick={()=>setConfirm(c._id)} className="btn btn-danger btn-sm">Delete</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ClientModal({ client, onClose, onSave }) {
+  const [form, setForm] = useState(client);
+  const [saving, setSaving] = useState(false);
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+  const submit = async () => { setSaving(true); await onSave(form); setSaving(false); };
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()}>
+        <div className="modal-head">
+          <h2 style={{fontSize:16,fontWeight:700,color:"var(--text)"}}>{client._id?"Edit Client":"New Client"}</h2>
+          <button onClick={onClose} className="btn btn-ghost btn-sm">✕</button>
+        </div>
+        <div className="modal-body">
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+            {[["name","Name"],["company","Company"],["email","Email"],["phone","Phone"]].map(([k,l])=>(
+              <div key={k}>
+                <label className="lbl" style={{display:"block",marginBottom:6}}>{l}</label>
+                <input className="input" value={form[k]||""} onChange={e=>set(k,e.target.value)} />
+              </div>
+            ))}
+            <div style={{gridColumn:"1/-1"}}>
+              <label className="lbl" style={{display:"block",marginBottom:6}}>Address</label>
+              <input className="input" value={form.address||""} onChange={e=>set("address",e.target.value)} />
+            </div>
+            <div>
+              <label className="lbl" style={{display:"block",marginBottom:6}}>Status</label>
+              <select className="input" value={form.status||"active"} onChange={e=>set("status",e.target.value)}>
+                {["active","inactive","prospect"].map(s=><option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div style={{gridColumn:"1/-1"}}>
+              <label className="lbl" style={{display:"block",marginBottom:6}}>Notes</label>
+              <textarea className="input" value={form.notes||""} onChange={e=>set("notes",e.target.value)} style={{minHeight:70}} />
+            </div>
+          </div>
+        </div>
+        <div className="modal-foot">
+          <button onClick={onClose} className="btn btn-ghost">Cancel</button>
+          <button onClick={submit} disabled={saving} className="btn btn-primary">
+            {saving?<><span className="spin">◌</span> Saving…</>:"Save Client"}
+          </button>
         </div>
       </div>
     </div>
@@ -558,75 +687,66 @@ function Dashboard() {
 /* ═══════════════════════════════════════════════
    BLOG MANAGER
 ═══════════════════════════════════════════════ */
-const EMPTY_POST = { title:"", slug:"", tag:"", date:"", read_time:"", summary:"", content:"", cover_image:"", featured:false, display_order:0 };
-
 function BlogManager() {
-  const [posts, setPosts]     = useState([]);
-  const [loading, setLoading] = useState(true);
+  const posts       = useQuery(api.cms.listPosts)   || [];
+  const createPost  = useMutation(api.cms.createPost);
+  const updatePost  = useMutation(api.cms.updatePost);
+  const deletePost  = useMutation(api.cms.deletePost);
   const [modal, setModal]     = useState(null);
   const [confirm, setConfirm] = useState(null);
   const { show, el:toastEl }  = useToast();
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try { setPosts(await sbFetch("blog_posts",{query:"select=*&order=display_order.asc,created_at.desc"})); }
-    catch { show("Failed to load","error"); }
-    setLoading(false);
-  }, [show]);
+  const EMPTY = {title:"",slug:"",content:"",excerpt:"",cover_image:"",featured:false,display_order:0,category:"",tags:"",author:"",published:true};
 
-  useEffect(()=>{ load(); },[load]);
-
-  const save = useCallback(async (data) => {
+  const save = async (data) => {
     try {
-      const {_slugEdited:_b, ...blogPayload} = data;
-      if (blogPayload.id) { const{id,...r}=blogPayload; await sbFetch(`blog_posts?id=eq.${id}`,{method:"PATCH",body:r}); show("Post updated"); }
-      else { await sbFetch("blog_posts",{method:"POST",body:blogPayload}); show("Post published"); }
-      setModal(null); load();
-    } catch(e) { show("Save failed: "+e.message,"error"); }
-  }, [load, show]);
+      const {_id,_creationTime,_slugEdited,...payload} = data;
+      if(_id) await updatePost({id:_id,...payload});
+      else await createPost(payload);
+      show("Saved"); setModal(null);
+    } catch(e){ show("Failed: "+e.message,"error"); }
+  };
 
-  const del = useCallback(async (id) => {
-    try { await sbFetch(`blog_posts?id=eq.${id}`,{method:"DELETE"}); show("Post deleted"); setConfirm(null); load(); }
-    catch { show("Delete failed","error"); }
-  }, [load, show]);
+  const del = async (id) => {
+    try { await deletePost({id}); show("Deleted"); setConfirm(null); }
+    catch { show("Failed","error"); }
+  };
 
   return (
-    <div style={{ padding:"24px 32px 48px" }}>
+    <div style={{padding:"24px 32px 48px"}}>
       {toastEl}
-      {confirm && <Confirm msg="This will permanently delete this post." onConfirm={()=>del(confirm)} onCancel={()=>setConfirm(null)} />}
-      {modal && <PostModal mode={modal.mode} data={modal.data} onSave={save} onClose={()=>setModal(null)} />}
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end", marginBottom:28 }}>
+      {confirm && <Confirm msg="Delete this post permanently?" onConfirm={()=>del(confirm)} onCancel={()=>setConfirm(null)} />}
+      {modal && <PostModal mode={modal._id?"edit":"new"} data={modal} onSave={save} onClose={()=>setModal(null)} />}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:28}}>
         <div>
-          <h1 style={{ fontSize:22, fontWeight:700, color:"var(--text)", letterSpacing:"-.02em", fontFamily:"var(--display,-apple-system,'SF Pro Display',BlinkMacSystemFont,sans-serif)", marginBottom:5 }}>Blog Posts</h1>
-          <p style={{ fontSize:13.5, color:"var(--dim)" }}>{posts.length} post{posts.length!==1?"s":""}</p>
+          <h1 style={{fontSize:22,fontWeight:700,color:"var(--text)",letterSpacing:"-.02em",fontFamily:"var(--display)",marginBottom:5}}>Blog Posts</h1>
+          <p style={{fontSize:13.5,color:"var(--dim)"}}>{posts.length} post{posts.length!==1?"s":""}</p>
         </div>
-        <button onClick={()=>setModal({mode:"new",data:{...EMPTY_POST}})} className="btn btn-primary">+ New Post</button>
+        <button onClick={()=>setModal({...EMPTY})} className="btn btn-primary">+ New Post</button>
       </div>
-      <div className="card" style={{ overflow:"hidden" }}>
-        {loading ? <Loader /> : posts.length===0 ? (
-          <Empty icon="✍" label="No blog posts yet." action={<button onClick={()=>setModal({mode:"new",data:{...EMPTY_POST}})} className="btn btn-primary btn-sm">Write your first post</button>} />
-        ) : (
+      <div className="card" style={{overflow:"hidden"}}>
+        {posts.length===0 ? <Empty icon="✍" label="No blog posts yet." action={<button onClick={()=>setModal({...EMPTY})} className="btn btn-primary btn-sm">Write your first post</button>} /> : (
           <table className="table">
-            <thead><tr><th>Post</th><th>Tag</th><th>Date</th><th>Featured</th><th style={{textAlign:"right"}}>Actions</th></tr></thead>
+            <thead><tr><th>Post</th><th>Category</th><th>Featured</th><th>Published</th><th style={{textAlign:"right"}}>Actions</th></tr></thead>
             <tbody>
               {posts.map(p=>(
-                <tr key={p.id}>
+                <tr key={p._id}>
                   <td>
-                    <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-                      {p.cover_image && <img src={p.cover_image} alt="" style={{ width:44,height:44,borderRadius:6,objectFit:"cover",border:"1px solid var(--bd)",flexShrink:0 }} />}
+                    <div style={{display:"flex",alignItems:"center",gap:12}}>
+                      {p.cover_image && <img src={p.cover_image} alt="" style={{width:44,height:44,borderRadius:6,objectFit:"cover",border:"1px solid var(--bd)",flexShrink:0}} />}
                       <div>
-                        <div style={{ fontWeight:600, color:"var(--text)", maxWidth:280 }}>{p.title}</div>
-                        <div style={{ fontSize:12, color:"var(--muted)", marginTop:2, maxWidth:280, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.summary}</div>
+                        <div style={{fontWeight:600,color:"var(--text)",maxWidth:280}}>{p.title}</div>
+                        <div style={{fontSize:12,color:"var(--muted)",marginTop:2,maxWidth:280,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.excerpt}</div>
                       </div>
                     </div>
                   </td>
-                  <td><span className="badge badge-pink">{p.tag}</span></td>
-                  <td style={{ color:"var(--dim)", fontSize:13 }}>{p.date}</td>
+                  <td>{p.category?<span className="badge badge-pink">{p.category}</span>:<span style={{color:"var(--muted)"}}>—</span>}</td>
                   <td>{p.featured?<span className="badge badge-green">Featured</span>:<span style={{color:"var(--muted)",fontSize:12}}>—</span>}</td>
+                  <td>{p.published?<span className="badge badge-blue">Published</span>:<span className="badge badge-dim">Draft</span>}</td>
                   <td>
-                    <div style={{ display:"flex", gap:6, justifyContent:"flex-end" }}>
-                      <button onClick={()=>setModal({mode:"edit",data:{...p}})} className="btn btn-ghost btn-sm">Edit</button>
-                      <button onClick={()=>setConfirm(p.id)} className="btn btn-danger btn-sm">Delete</button>
+                    <div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
+                      <button onClick={()=>setModal({...p})} className="btn btn-ghost btn-sm">Edit</button>
+                      <button onClick={()=>setConfirm(p._id)} className="btn btn-danger btn-sm">Delete</button>
                     </div>
                   </td>
                 </tr>
@@ -640,20 +760,20 @@ function BlogManager() {
 }
 
 function PostModal({ mode, data, onSave, onClose }) {
-  const [form, setForm]     = useState(data);
+  const [form, setForm] = useState(data);
   const [saving, setSaving] = useState(false);
-  const set = (k,v) => setForm(f => {
-    const updated = {...f,[k]:v};
-    // Auto-generate slug from title only when creating new post and slug hasn't been manually edited
-    if (k === "title" && !f._slugEdited) updated.slug = slugify(v);
-    if (k === "slug") updated._slugEdited = true;
-    return updated;
+  const set = (k,v) => setForm(f=>{
+    const u={...f,[k]:v};
+    if(k==="title"&&!f._slugEdited) u.slug=slugify(v);
+    if(k==="slug") u._slugEdited=true;
+    return u;
   });
   const submit = async () => {
-    if (!form.title?.trim()) { alert("Title is required."); return; }
-    if (!form.slug?.trim())  { alert("URL slug is required."); return; }
-    const cleaned = {...form, slug: form.slug.toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,"") };
-    setSaving(true); await onSave(cleaned); setSaving(false);
+    if(!form.title?.trim()){ alert("Title required"); return; }
+    if(!form.slug?.trim()){ alert("Slug required"); return; }
+    setSaving(true);
+    await onSave({...form,slug:form.slug.toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,"")});
+    setSaving(false);
   };
   return (
     <div className="modal-bg" onClick={onClose}>
@@ -663,64 +783,55 @@ function PostModal({ mode, data, onSave, onClose }) {
           <button onClick={onClose} className="btn btn-ghost btn-sm">✕</button>
         </div>
         <div className="modal-body">
-          <ImageField label="Cover Image / GIF / Video" value={form.cover_image} onChange={v=>set("cover_image",v)} />
+          <ImageField label="Cover Image" value={form.cover_image} onChange={v=>set("cover_image",v)} />
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
             <div style={{gridColumn:"1/-1"}}>
               <label className="lbl" style={{display:"block",marginBottom:8}}>Title</label>
-              <input className="input" placeholder="Post title" value={form.title||""} onChange={e=>set("title",e.target.value)} maxLength={120} />
+              <input className="input" value={form.title||""} onChange={e=>set("title",e.target.value)} maxLength={120} />
             </div>
             <div style={{gridColumn:"1/-1"}}>
-              <label className="lbl" style={{display:"block",marginBottom:8}}>URL Slug</label>
-              <div style={{display:"flex",alignItems:"center",gap:0,background:"var(--s2)",border:"1px solid var(--bd)",borderRadius:8,overflow:"hidden"}}>
-                <span style={{padding:"10px 12px",fontSize:13,color:"var(--muted)",borderRight:"1px solid var(--bd)",whiteSpace:"nowrap",flexShrink:0}}>1204studios.com/blog/</span>
-                <input className="input" placeholder="url-slug-here" value={form.slug||""} onChange={e=>set("slug",e.target.value)}
-                  style={{border:"none",borderRadius:0,background:"transparent",fontFamily:"monospace"}} />
+              <label className="lbl" style={{display:"block",marginBottom:8}}>Slug</label>
+              <div style={{display:"flex",alignItems:"center",background:"var(--s2)",border:"1px solid var(--bd)",borderRadius:8,overflow:"hidden"}}>
+                <span style={{padding:"10px 12px",fontSize:13,color:"var(--muted)",borderRight:"1px solid var(--bd)",whiteSpace:"nowrap"}}>1204studios.com/blog/</span>
+                <input className="input" value={form.slug||""} onChange={e=>set("slug",e.target.value)} style={{border:"none",borderRadius:0,background:"transparent",fontFamily:"monospace"}} />
               </div>
-              <p style={{fontSize:11,color:"var(--muted)",marginTop:5}}>Auto-generated from title. Edit to customise.</p>
             </div>
             <div>
-              <label className="lbl" style={{display:"block",marginBottom:8}}>Tag</label>
-              <input className="input" placeholder="e.g. Marketing" value={form.tag||""} onChange={e=>set("tag",e.target.value)} />
+              <label className="lbl" style={{display:"block",marginBottom:8}}>Category</label>
+              <input className="input" placeholder="e.g. Branding" value={form.category||""} onChange={e=>set("category",e.target.value)} />
             </div>
             <div>
-              <label className="lbl" style={{display:"block",marginBottom:8}}>Date</label>
-              <input className="input" type="date" value={form.date||""} onChange={e=>set("date",e.target.value)} />
+              <label className="lbl" style={{display:"block",marginBottom:8}}>Author</label>
+              <input className="input" placeholder="e.g. Paul" value={form.author||""} onChange={e=>set("author",e.target.value)} />
             </div>
             <div>
-              <label className="lbl" style={{display:"block",marginBottom:8}}>Read Time</label>
-              <input className="input" placeholder="6 min read" value={form.read_time||""} onChange={e=>set("read_time",e.target.value)} />
+              <label className="lbl" style={{display:"block",marginBottom:8}}>Display Order</label>
+              <input type="number" className="input" value={form.display_order||0} onChange={e=>set("display_order",+e.target.value)} />
             </div>
           </div>
           <div>
-            <label className="lbl" style={{display:"block",marginBottom:8}}>Summary</label>
-            <textarea className="input" placeholder="One-line summary shown on cards" value={form.summary||""} onChange={e=>set("summary",e.target.value)} style={{minHeight:70}} />
+            <label className="lbl" style={{display:"block",marginBottom:8}}>Excerpt</label>
+            <textarea className="input" value={form.excerpt||""} onChange={e=>set("excerpt",e.target.value)} style={{minHeight:70}} />
           </div>
           <div>
             <label className="lbl" style={{display:"block",marginBottom:8}}>Content</label>
-            <div style={{background:"var(--s3)",border:"1px solid var(--bd)",borderRadius:8,padding:"12px 14px",marginBottom:10,fontSize:12,color:"var(--dim)",lineHeight:1.8}}>
-              <span style={{color:"var(--pink)",fontWeight:600}}>Formatting guide: </span>
-              <span style={{opacity:.8}}>
-                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>## Heading</code>{" · "}
-                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>**bold**</code>{" · "}
-                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>{"> quote"}</code>{" · "}
-                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>---</code>{" divider · "}
-                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>{"![caption](url)"}</code>{" image · "}
-                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>@youtube(VIDEO_ID)</code>{" · "}
-                <code style={{background:"var(--s2)",padding:"1px 5px",borderRadius:3,fontSize:11}}>@video(url)</code>
-                {" · Use double line break between blocks"}
-              </span>
-            </div>
-            <textarea className="input" placeholder={"Write your post here...\n\nUse double line breaks between paragraphs.\n\n## Add a heading like this\n\n![Image caption](https://your-image-url.jpg)\n\n@youtube(dQw4w9WgXcQ)\n\n> This is a pull quote that stands out"} value={form.content||""} onChange={e=>set("content",e.target.value)} style={{minHeight:300,fontFamily:"monospace",fontSize:13}} />
+            <textarea className="input" value={form.content||""} onChange={e=>set("content",e.target.value)} style={{minHeight:280,fontFamily:"monospace",fontSize:13}} />
           </div>
-          <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <input type="checkbox" id="bp-feat" checked={!!form.featured} onChange={e=>set("featured",e.target.checked)} style={{width:15,height:15,accentColor:"var(--pink)",cursor:"pointer"}} />
-            <label htmlFor="bp-feat" style={{fontSize:13.5,color:"var(--text)",cursor:"pointer"}}>Mark as Featured — shows on homepage</label>
+          <div style={{display:"flex",gap:20}}>
+            <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13.5,color:"var(--text)"}}>
+              <input type="checkbox" checked={!!form.featured} onChange={e=>set("featured",e.target.checked)} style={{width:15,height:15,accentColor:"var(--pink)"}} />
+              Featured
+            </label>
+            <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13.5,color:"var(--text)"}}>
+              <input type="checkbox" checked={!!form.published} onChange={e=>set("published",e.target.checked)} style={{width:15,height:15,accentColor:"var(--pink)"}} />
+              Published
+            </label>
           </div>
         </div>
         <div className="modal-foot">
           <button onClick={onClose} className="btn btn-ghost">Cancel</button>
           <button onClick={submit} disabled={saving} className="btn btn-primary">
-            {saving?<><span className="spin">◌</span> Saving…</>:mode==="new"?"Publish Post":"Save Changes"}
+            {saving?<><span className="spin">◌</span> Saving…</>:mode==="new"?"Publish":"Save Changes"}
           </button>
         </div>
       </div>
@@ -731,73 +842,61 @@ function PostModal({ mode, data, onSave, onClose }) {
 /* ═══════════════════════════════════════════════
    PORTFOLIO MANAGER
 ═══════════════════════════════════════════════ */
-const EMPTY_CS = { title:"", slug:"", category:"", year:"", hero_color:"#1a1a2e", cover_image:"", summary:"", challenge:"", approach:"", result:"", tags:"", featured:false, display_order:0 };
-
 function PortfolioManager() {
-  const [items, setItems]     = useState([]);
-  const [loading, setLoading] = useState(true);
+  const items          = useQuery(api.cms.listCaseStudies)   || [];
+  const createCS       = useMutation(api.cms.createCaseStudy);
+  const updateCS       = useMutation(api.cms.updateCaseStudy);
+  const deleteCS       = useMutation(api.cms.deleteCaseStudy);
   const [modal, setModal]     = useState(null);
   const [confirm, setConfirm] = useState(null);
   const { show, el:toastEl }  = useToast();
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try { setItems(await sbFetch("case_studies",{query:"select=*&order=display_order.asc"})); }
-    catch { show("Failed to load","error"); }
-    setLoading(false);
-  }, [show]);
+  const EMPTY = {title:"",slug:"",client:"",category:"",tags:"",cover_image:"",content:"",excerpt:"",featured:false,display_order:0,results:"",testimonial:"",published:true};
 
-  useEffect(()=>{ load(); },[load]);
-
-  const save = useCallback(async (data) => {
+  const save = async (data) => {
     try {
-      const {_slugEdited:_c, ...csData} = data;
-      const payload = {...csData, tags: typeof csData.tags==="string"?csData.tags.split(",").map(t=>t.trim()).filter(Boolean):csData.tags||[]};
-      if (payload.id) { const{id,...r}=payload; await sbFetch(`case_studies?id=eq.${id}`,{method:"PATCH",body:r}); show("Updated"); }
-      else { await sbFetch("case_studies",{method:"POST",body:payload}); show("Created"); }
-      setModal(null); load();
-    } catch(e) { show("Save failed: "+e.message,"error"); }
-  }, [load, show]);
+      const {_id,_creationTime,_slugEdited,...payload} = data;
+      if(_id) await updateCS({id:_id,...payload});
+      else await createCS(payload);
+      show("Saved"); setModal(null);
+    } catch(e){ show("Failed: "+e.message,"error"); }
+  };
 
-  const del = useCallback(async (id) => {
-    try { await sbFetch(`case_studies?id=eq.${id}`,{method:"DELETE"}); show("Deleted"); setConfirm(null); load(); }
-    catch { show("Delete failed","error"); }
-  }, [load, show]);
+  const del = async (id) => {
+    try { await deleteCS({id}); show("Deleted"); setConfirm(null); }
+    catch { show("Failed","error"); }
+  };
 
   return (
-    <div style={{ padding:"24px 32px 48px" }}>
+    <div style={{padding:"24px 32px 48px"}}>
       {toastEl}
-      {confirm && <Confirm msg="This will permanently delete this case study." onConfirm={()=>del(confirm)} onCancel={()=>setConfirm(null)} />}
-      {modal && <CSModal mode={modal.mode} data={modal.data} onSave={save} onClose={()=>setModal(null)} />}
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end", marginBottom:28 }}>
+      {confirm && <Confirm msg="Delete this case study?" onConfirm={()=>del(confirm)} onCancel={()=>setConfirm(null)} />}
+      {modal && <CSModal mode={modal._id?"edit":"new"} data={modal} onSave={save} onClose={()=>setModal(null)} />}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:28}}>
         <div>
-          <h1 style={{ fontSize:22, fontWeight:700, color:"var(--text)", letterSpacing:"-.02em", fontFamily:"var(--display,-apple-system,'SF Pro Display',BlinkMacSystemFont,sans-serif)", marginBottom:5 }}>Portfolio</h1>
-          <p style={{ fontSize:13.5, color:"var(--dim)" }}>{items.length} case stud{items.length!==1?"ies":"y"}</p>
+          <h1 style={{fontSize:22,fontWeight:700,color:"var(--text)",letterSpacing:"-.02em",fontFamily:"var(--display)",marginBottom:5}}>Portfolio</h1>
+          <p style={{fontSize:13.5,color:"var(--dim)"}}>{items.length} case stud{items.length!==1?"ies":"y"}</p>
         </div>
-        <button onClick={()=>setModal({mode:"new",data:{...EMPTY_CS}})} className="btn btn-primary">+ New Case Study</button>
+        <button onClick={()=>setModal({...EMPTY})} className="btn btn-primary">+ New Case Study</button>
       </div>
-      {loading ? <Loader /> : items.length===0 ? (
-        <div className="card"><Empty icon="◈" label="No case studies yet." action={<button onClick={()=>setModal({mode:"new",data:{...EMPTY_CS}})} className="btn btn-primary btn-sm">Add your first</button>} /></div>
-      ) : (
-        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(290px,1fr))", gap:14 }}>
+      {items.length===0 ? <div className="card"><Empty icon="◆" label="No case studies yet." /></div> : (
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(290px,1fr))",gap:14}}>
           {items.map(cs=>(
-            <div key={cs.id} className="card" style={{overflow:"hidden"}}>
-              {cs.cover_image
-                ? <img src={cs.cover_image} alt={cs.title} style={{width:"100%",height:140,objectFit:"cover",display:"block"}} />
-                : <div style={{height:6,background:cs.hero_color||"var(--pink)"}} />}
+            <div key={cs._id} className="card" style={{overflow:"hidden"}}>
+              {cs.cover_image ? <img src={cs.cover_image} alt={cs.title} style={{width:"100%",height:140,objectFit:"cover",display:"block"}} /> : <div style={{height:6,background:"var(--pink)"}} />}
               <div style={{padding:"18px 18px 14px"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8,gap:8}}>
                   <h3 style={{fontSize:13.5,fontWeight:700,color:"var(--text)",lineHeight:1.4}}>{cs.title}</h3>
-                  {cs.featured&&<span className="badge badge-green" style={{flexShrink:0}}>Featured</span>}
+                  {cs.featured && <span className="badge badge-green" style={{flexShrink:0}}>Featured</span>}
                 </div>
                 <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
-                  <span className="badge badge-pink">{cs.category}</span>
-                  <span className="badge badge-dim">{cs.year}</span>
+                  {cs.category && <span className="badge badge-pink">{cs.category}</span>}
+                  {!cs.published && <span className="badge badge-dim">Draft</span>}
                 </div>
-                <p style={{fontSize:12.5,color:"var(--muted)",lineHeight:1.6,marginBottom:14,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{cs.summary}</p>
+                <p style={{fontSize:12.5,color:"var(--muted)",lineHeight:1.6,marginBottom:14,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{cs.excerpt}</p>
                 <div style={{display:"flex",gap:8}}>
-                  <button onClick={()=>setModal({mode:"edit",data:{...cs,tags:Array.isArray(cs.tags)?cs.tags.join(", "):cs.tags||""}})} className="btn btn-ghost btn-sm" style={{flex:1,justifyContent:"center"}}>Edit</button>
-                  <button onClick={()=>setConfirm(cs.id)} className="btn btn-danger btn-sm">✕</button>
+                  <button onClick={()=>setModal({...cs,tags:Array.isArray(cs.tags)?cs.tags:cs.tags||""})} className="btn btn-ghost btn-sm" style={{flex:1,justifyContent:"center"}}>Edit</button>
+                  <button onClick={()=>setConfirm(cs._id)} className="btn btn-danger btn-sm">✕</button>
                 </div>
               </div>
             </div>
@@ -809,20 +908,19 @@ function PortfolioManager() {
 }
 
 function CSModal({ mode, data, onSave, onClose }) {
-  const [form, setForm]     = useState(data);
+  const [form, setForm] = useState(data);
   const [saving, setSaving] = useState(false);
-  const set = (k,v) => setForm(f => {
-    const updated = {...f,[k]:v};
-    // Auto-generate slug from title only when creating new post and slug hasn't been manually edited
-    if (k === "title" && !f._slugEdited) updated.slug = slugify(v);
-    if (k === "slug") updated._slugEdited = true;
-    return updated;
+  const set = (k,v) => setForm(f=>{
+    const u={...f,[k]:v};
+    if(k==="title"&&!f._slugEdited) u.slug=slugify(v);
+    if(k==="slug") u._slugEdited=true;
+    return u;
   });
   const submit = async () => {
-    if (!form.title?.trim()) { alert("Title is required."); return; }
-    if (!form.slug?.trim())  { alert("URL slug is required."); return; }
-    const cleaned = {...form, slug: form.slug.toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,"") };
-    setSaving(true); await onSave(cleaned); setSaving(false);
+    if(!form.title?.trim()){ alert("Title required"); return; }
+    setSaving(true);
+    await onSave({...form,slug:(form.slug||slugify(form.title)).toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,"")});
+    setSaving(false);
   };
   return (
     <div className="modal-bg" onClick={onClose}>
@@ -832,53 +930,54 @@ function CSModal({ mode, data, onSave, onClose }) {
           <button onClick={onClose} className="btn btn-ghost btn-sm">✕</button>
         </div>
         <div className="modal-body">
-          <ImageField label="Cover Image / Hero Visual" value={form.cover_image} onChange={v=>set("cover_image",v)} />
+          <ImageField label="Cover Image" value={form.cover_image} onChange={v=>set("cover_image",v)} />
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
             <div style={{gridColumn:"1/-1"}}>
-              <label className="lbl" style={{display:"block",marginBottom:8}}>Project Title</label>
-              <input className="input" placeholder="e.g. Greenleaf Environmental Agency" value={form.title||""} onChange={e=>set("title",e.target.value)} maxLength={120} />
+              <label className="lbl" style={{display:"block",marginBottom:8}}>Title</label>
+              <input className="input" value={form.title||""} onChange={e=>set("title",e.target.value)} maxLength={120} />
             </div>
             <div style={{gridColumn:"1/-1"}}>
-              <label className="lbl" style={{display:"block",marginBottom:8}}>URL Slug</label>
-              <div style={{display:"flex",alignItems:"center",gap:0,background:"var(--s2)",border:"1px solid var(--bd)",borderRadius:8,overflow:"hidden"}}>
-                <span style={{padding:"10px 12px",fontSize:13,color:"var(--muted)",borderRight:"1px solid var(--bd)",whiteSpace:"nowrap",flexShrink:0}}>1204studios.com/portfolio/</span>
-                <input className="input" placeholder="url-slug-here" value={form.slug||""} onChange={e=>set("slug",e.target.value)}
-                  style={{border:"none",borderRadius:0,background:"transparent",fontFamily:"monospace"}} />
+              <label className="lbl" style={{display:"block",marginBottom:8}}>Slug</label>
+              <div style={{display:"flex",alignItems:"center",background:"var(--s2)",border:"1px solid var(--bd)",borderRadius:8,overflow:"hidden"}}>
+                <span style={{padding:"10px 12px",fontSize:13,color:"var(--muted)",borderRight:"1px solid var(--bd)",whiteSpace:"nowrap"}}>1204studios.com/portfolio/</span>
+                <input className="input" value={form.slug||""} onChange={e=>set("slug",e.target.value)} style={{border:"none",borderRadius:0,background:"transparent",fontFamily:"monospace"}} />
               </div>
-              <p style={{fontSize:11,color:"var(--muted)",marginTop:5}}>Auto-generated from title. Edit to customise.</p>
+            </div>
+            <div>
+              <label className="lbl" style={{display:"block",marginBottom:8}}>Client</label>
+              <input className="input" value={form.client||""} onChange={e=>set("client",e.target.value)} />
             </div>
             <div>
               <label className="lbl" style={{display:"block",marginBottom:8}}>Category</label>
               <select className="input" value={form.category||""} onChange={e=>set("category",e.target.value)}>
                 <option value="">Select…</option>
-                {["Brand Identity","Marketing Campaign","Print Media","Web Design","Other"].map(o=><option key={o} value={o}>{o}</option>)}
+                {["Brand Identity","Marketing Campaign","Print Media","Web Design","Strategy","Other"].map(o=><option key={o} value={o}>{o}</option>)}
               </select>
             </div>
             <div>
-              <label className="lbl" style={{display:"block",marginBottom:8}}>Year</label>
-              <input className="input" placeholder="2024" value={form.year||""} onChange={e=>set("year",e.target.value)} />
+              <label className="lbl" style={{display:"block",marginBottom:8}}>Tags (comma separated)</label>
+              <input className="input" value={form.tags||""} onChange={e=>set("tags",e.target.value)} placeholder="Branding, NGO, Lagos" />
             </div>
             <div>
-              <label className="lbl" style={{display:"block",marginBottom:8}}>Hero Colour</label>
-              <div style={{display:"flex",gap:8}}>
-                <input type="color" value={form.hero_color||"#1a1a2e"} onChange={e=>set("hero_color",e.target.value)} style={{width:42,height:42,border:"1px solid var(--bd)",borderRadius:7,background:"none",cursor:"pointer",padding:2}} />
-                <input className="input" value={form.hero_color||""} onChange={e=>set("hero_color",e.target.value)} placeholder="#1a1a2e" />
-              </div>
-            </div>
-            <div>
-              <label className="lbl" style={{display:"block",marginBottom:8}}>Tags</label>
-              <input className="input" placeholder="Branding, NGO, Lagos" value={form.tags||""} onChange={e=>set("tags",e.target.value)} />
+              <label className="lbl" style={{display:"block",marginBottom:8}}>Display Order</label>
+              <input type="number" className="input" value={form.display_order||0} onChange={e=>set("display_order",+e.target.value)} />
             </div>
           </div>
-          {[{k:"summary",l:"Summary",p:"One paragraph overview"},{k:"challenge",l:"The Challenge",p:"What problem were you solving?"},{k:"approach",l:"Our Approach",p:"How did you tackle it?"},{k:"result",l:"The Result",p:"What was the outcome?"}].map(f=>(
+          {[{k:"excerpt",l:"Excerpt",p:"One paragraph summary"},{k:"content",l:"Full Content",p:"Full write-up"},{k:"results",l:"Results",p:"What was the outcome?"},{k:"testimonial",l:"Testimonial",p:"Client quote"}].map(f=>(
             <div key={f.k}>
               <label className="lbl" style={{display:"block",marginBottom:8}}>{f.l}</label>
-              <textarea className="input" placeholder={f.p} value={form[f.k]||""} onChange={e=>set(f.k,e.target.value)} style={{minHeight:80}} />
+              <textarea className="input" placeholder={f.p} value={form[f.k]||""} onChange={e=>set(f.k,e.target.value)} style={{minHeight:70}} />
             </div>
           ))}
-          <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <input type="checkbox" id="cs-feat" checked={!!form.featured} onChange={e=>set("featured",e.target.checked)} style={{width:15,height:15,accentColor:"var(--pink)",cursor:"pointer"}} />
-            <label htmlFor="cs-feat" style={{fontSize:13.5,color:"var(--text)",cursor:"pointer"}}>Mark as Featured — shows on homepage</label>
+          <div style={{display:"flex",gap:20}}>
+            <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13.5,color:"var(--text)"}}>
+              <input type="checkbox" checked={!!form.featured} onChange={e=>set("featured",e.target.checked)} style={{width:15,height:15,accentColor:"var(--pink)"}} />
+              Featured
+            </label>
+            <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer",fontSize:13.5,color:"var(--text)"}}>
+              <input type="checkbox" checked={!!form.published} onChange={e=>set("published",e.target.checked)} style={{width:15,height:15,accentColor:"var(--pink)"}} />
+              Published
+            </label>
           </div>
         </div>
         <div className="modal-foot" style={{position:"sticky",bottom:0,background:"var(--s1)"}}>
@@ -893,123 +992,30 @@ function CSModal({ mode, data, onSave, onClose }) {
 }
 
 /* ═══════════════════════════════════════════════
-   MEDIA LIBRARY PAGE
+   MEDIA LIBRARY (URL-based — Convex file storage optional)
 ═══════════════════════════════════════════════ */
 function MediaLibrary() {
-  const [files, setFiles]         = useState([]);
-  const [loading, setLoading]     = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const [progress, setProgress]   = useState(0);
-  const [confirm, setConfirm]     = useState(null);
-  const [copied, setCopied]       = useState(null);
-  const [filter, setFilter]       = useState("all");
-  const [drag, setDrag]           = useState(false);
-  const inputRef                  = useRef();
-  const { show, el:toastEl }      = useToast();
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try { setFiles(await storageList()); } catch { show("Failed to load","error"); }
-    setLoading(false);
-  }, [show]);
-
-  useEffect(()=>{ load(); },[load]);
-
-  const ALLOWED_TYPES = ["image/jpeg","image/png","image/gif","image/webp","image/svg+xml","video/mp4","video/webm"];
-  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-  const upload = useCallback(async (fileList) => {
-    for (const file of fileList) {
-      if (!ALLOWED_TYPES.includes(file.type)) { show(`File type not allowed: ${file.name}`); return; }
-      if (file.size > MAX_FILE_SIZE) { show(`File too large (max 10MB): ${file.name}`); return; }
-    }
-    if (!fileList?.length) return;
-    setUploading(true); setProgress(5);
-    try {
-      for (let i=0;i<fileList.length;i++) {
-        await storageUpload(fileList[i]);
-        setProgress(Math.round(((i+1)/fileList.length)*100));
-      }
-      show(`${fileList.length} file(s) uploaded`);
-      await load();
-    } catch(e) { show("Upload failed: "+e.message,"error"); }
-    setUploading(false); setProgress(0);
-  }, [load, show]);
-
-  const del = useCallback(async (name) => {
-    try { await storageDelete(name); show("Deleted"); setConfirm(null); load(); }
-    catch { show("Delete failed","error"); }
-  }, [load, show]);
-
-  const copy = url => {
-    navigator.clipboard.writeText(url);
-    setCopied(url); setTimeout(()=>setCopied(null),2000);
-    show("URL copied");
-  };
-
-  const onDrop = e => { e.preventDefault(); setDrag(false); upload(e.dataTransfer.files); };
-
-  const filtered = files.filter(f=>{
-    if (filter==="images") return isImage(f)&&!isGif(f);
-    if (filter==="videos") return isVideo(f);
-    if (filter==="gifs")   return isGif(f);
-    return true;
-  });
-
   return (
-    <div style={{ padding:"24px 32px 48px" }}>
-      {toastEl}
-      {confirm && <Confirm msg={`Delete this file? This cannot be undone.`} onConfirm={()=>del(confirm)} onCancel={()=>setConfirm(null)} />}
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-end", marginBottom:28 }}>
-        <div>
-          <h1 style={{ fontSize:22, fontWeight:700, color:"var(--text)", letterSpacing:"-.02em", fontFamily:"var(--display,-apple-system,'SF Pro Display',BlinkMacSystemFont,sans-serif)", marginBottom:5 }}>Media Library</h1>
-          <p style={{ fontSize:13.5, color:"var(--dim)" }}>{files.length} file{files.length!==1?"s":""} in Supabase Storage</p>
-        </div>
-        <button onClick={()=>inputRef.current.click()} disabled={uploading} className="btn btn-primary">
-          {uploading?<><span className="spin">◌</span> {progress}%</>:"↑ Upload Files"}
-        </button>
+    <div style={{padding:"24px 32px 48px"}}>
+      <div style={{marginBottom:28}}>
+        <h1 style={{fontSize:22,fontWeight:700,color:"var(--text)",letterSpacing:"-.02em",fontFamily:"var(--display)",marginBottom:5}}>Media Library</h1>
+        <p style={{fontSize:13.5,color:"var(--dim)"}}>Paste image URLs directly into blog posts and case studies.</p>
       </div>
-
-      <div className={`drop-zone${drag?" drag":""}`} style={{marginBottom:16}}
-        onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)}
-        onDrop={onDrop} onClick={()=>inputRef.current.click()}>
-        <div style={{fontSize:22,marginBottom:8}}>☁</div>
-        <p style={{fontSize:13.5,color:"var(--dim)"}}>Drag & drop files here, or <span style={{color:"var(--pink)"}}>click to browse</span></p>
-        <p style={{fontSize:12,color:"var(--muted)",marginTop:5}}>Images (JPG, PNG, WebP) · GIFs · Videos (MP4, MOV, WebM)</p>
-      </div>
-      <input ref={inputRef} type="file" multiple accept="image/*,video/*,.gif" style={{display:"none"}} onChange={e=>upload(e.target.files)} />
-
-      {uploading && (
-        <div style={{height:3,background:"var(--bd)",borderRadius:2,marginBottom:16,overflow:"hidden"}}>
-          <div style={{height:"100%",background:"var(--pink)",width:`${progress}%`,transition:"width .4s"}} />
+      <div className="card" style={{padding:"32px",textAlign:"center"}}>
+        <div style={{fontSize:36,marginBottom:16}}>🖼</div>
+        <p style={{fontSize:14,fontWeight:600,color:"var(--text)",marginBottom:8}}>Use hosted image URLs</p>
+        <p style={{fontSize:13,color:"var(--dim)",maxWidth:480,margin:"0 auto 24px"}}>
+          Upload images to any hosting service (Cloudinary, Imgbb, or your own CDN) and paste the URL directly into the cover image field when creating posts or case studies.
+        </p>
+        <div style={{display:"flex",gap:10,justifyContent:"center",flexWrap:"wrap"}}>
+          <a href="https://cloudinary.com" target="_blank" rel="noreferrer" className="btn btn-ghost btn-sm">Cloudinary (free)</a>
+          <a href="https://imgbb.com" target="_blank" rel="noreferrer" className="btn btn-ghost btn-sm">ImgBB (free)</a>
+          <a href="https://uploadcare.com" target="_blank" rel="noreferrer" className="btn btn-ghost btn-sm">Uploadcare</a>
         </div>
-      )}
-
-      <div style={{display:"flex",gap:6,marginBottom:20}}>
-        {[["all","All"],["images","Images"],["gifs","GIFs"],["videos","Videos"]].map(([v,l])=>(
-          <button key={v} onClick={()=>setFilter(v)} className={`btn btn-sm ${filter===v?"btn-primary":"btn-ghost"}`}>{l}</button>
-        ))}
+        <p style={{fontSize:12,color:"var(--muted)",marginTop:24}}>
+          Full Convex file storage integration can be added — see MIGRATION_GUIDE.md
+        </p>
       </div>
-
-      {loading ? <Loader label="Loading media…" /> : filtered.length===0 ? (
-        <div className="card"><Empty icon="🖼" label={filter==="all"?"No media uploaded yet.":"No "+filter+" found."} /></div>
-      ) : (
-        <div className="media-grid">
-          {filtered.map(f=>(
-            <div key={f.name} className="media-thumb" title={f.name}>
-              {isVideo(f)?<video src={f.url} muted style={{width:"100%",height:"100%",objectFit:"cover"}} />
-              :isImage(f)?<img src={f.url} alt={f.name} loading="lazy" />
-              :<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",fontSize:28}}>📄</div>}
-              <div className="ov">
-                <button onClick={()=>copy(f.url)} className="btn btn-primary btn-xs">{copied===f.url?"✓ Copied":"Copy URL"}</button>
-                <button onClick={()=>setConfirm(f.name)} className="btn btn-danger btn-xs">Delete</button>
-              </div>
-              <div style={{position:"absolute",bottom:0,left:0,right:0,padding:"3px 7px",background:"rgba(0,0,0,.75)",fontSize:10,color:"rgba(255,255,255,.6)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                {fmtSize(f.size)} · {isGif(f)?"GIF":isVideo(f)?"Video":"Image"}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -1019,11 +1025,13 @@ function MediaLibrary() {
 ═══════════════════════════════════════════════ */
 function AdminLayout({ logout }) {
   return (
-    <div style={{ display:"flex", height:"100vh", overflow:"hidden" }}>
+    <div style={{display:"flex",height:"100vh",overflow:"hidden"}}>
       <Sidebar logout={logout} />
-      <main style={{ flex:1, overflowY:"auto", overflowX:"hidden", background:"var(--bg)" }}>
+      <main style={{flex:1,overflowY:"auto",overflowX:"hidden",background:"var(--bg)"}}>
         <Routes>
           <Route path="/"          element={<Dashboard />} />
+          <Route path="/leads"     element={<LeadPipeline />} />
+          <Route path="/clients"   element={<ClientsPage />} />
           <Route path="/blog"      element={<BlogManager />} />
           <Route path="/portfolio" element={<PortfolioManager />} />
           <Route path="/media"     element={<MediaLibrary />} />
@@ -1035,11 +1043,11 @@ function AdminLayout({ logout }) {
 }
 
 export default function App() {
-  const { authed, login, logout } = useAuth();
+  const { authed, login, logout, lockMsg } = useAuth();
   return (
     <BrowserRouter>
       <Styles />
-      {authed ? <AdminLayout logout={logout} /> : <Login login={login} />}
+      {authed ? <AdminLayout logout={logout} /> : <Login login={login} lockMsg={lockMsg} />}
     </BrowserRouter>
   );
 }
