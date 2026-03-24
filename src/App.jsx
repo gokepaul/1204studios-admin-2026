@@ -1,18 +1,31 @@
 import { useState, useEffect, useCallback, useRef, memo, useMemo } from "react";
 import { BrowserRouter, Routes, Route, Link, useLocation, Navigate } from "react-router-dom";
+import { createClient } from "@supabase/supabase-js";
 
 /* ═══════════════════════════════════════════════
-   SUPABASE
+   SUPABASE CLIENT
 ═══════════════════════════════════════════════ */
 const LOGO_WHITE = "/logo-white.svg";
 const SB_URL = import.meta.env.VITE_SUPABASE_URL || "";
 const SB_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
-const H_JSON = { "apikey": SB_KEY, "Authorization": `Bearer ${SB_KEY}`, "Content-Type": "application/json", "Prefer": "return=representation" };
 
+// Single Supabase client instance — handles auth session automatically
+const supabase = createClient(SB_URL, SB_KEY);
+
+// sbFetch uses the authenticated user's JWT so RLS policies apply correctly
 async function sbFetch(table, opts = {}) {
   const { method = "GET", query = "", body } = opts;
+  // Get current session token — falls back to anon key if not signed in
+  const { data: { session } } = await supabase.auth.getSession();
+  const token = session?.access_token || SB_KEY;
+  const headers = {
+    "apikey": SB_KEY,
+    "Authorization": `Bearer ${token}`,
+    "Content-Type": "application/json",
+    "Prefer": "return=representation",
+  };
   const url = `${SB_URL}/rest/v1/${table}${query ? "?" + query : ""}`;
-  const r = await fetch(url, { method, headers: H_JSON, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
   if (!r.ok) { const e = await r.text(); throw new Error(e); }
   if (method === "DELETE") return true;
   const text = await r.text();
@@ -20,47 +33,39 @@ async function sbFetch(table, opts = {}) {
 }
 
 /* ═══════════════════════════════════════════════
-   AUTH
+   AUTH — Supabase email + password
 ═══════════════════════════════════════════════ */
-const ADMIN_PW_HASH = import.meta.env.VITE_ADMIN_PW_HASH || "15f56c7170340b82f356b2b140a0d3226eb6eeea72a44681dadef240b5a482df";
-const AUTH_KEY = "1204_admin_auth";
-const _adminLogin = { count: 0, firstAt: 0, lockUntil: 0 };
-
-async function hashPassword(pw) {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(pw));
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,"0")).join("");
-}
-
 function useAuth() {
-  const [authed, setAuthed] = useState(() => {
-    try {
-      const raw = sessionStorage.getItem(AUTH_KEY);
-      if (!raw) return false;
-      const { ts } = JSON.parse(raw);
-      const valid = ts && (Date.now() - ts) < 8 * 60 * 60 * 1000;
-      if (!valid) sessionStorage.removeItem(AUTH_KEY);
-      return valid;
-    } catch { sessionStorage.removeItem(AUTH_KEY); return false; }
-  });
-  const [lockMsg, setLockMsg] = useState("");
+  const [authed, setAuthed] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [authErr, setAuthErr] = useState("");
 
-  const login = async (pw) => {
-    const now = Date.now();
-    if (now < _adminLogin.lockUntil) { setLockMsg(`Too many attempts. Wait ${Math.ceil((_adminLogin.lockUntil-now)/1000)}s.`); return false; }
-    if (now - _adminLogin.firstAt > 15*60*1000) { _adminLogin.count=0; _adminLogin.firstAt=now; }
-    if (_adminLogin.count >= 5) { _adminLogin.lockUntil=now+15*60*1000; _adminLogin.count=0; setLockMsg("Locked for 15 minutes."); return false; }
-    _adminLogin.count++;
-    const hash = await hashPassword(pw);
-    if (hash === ADMIN_PW_HASH) {
-      _adminLogin.count=0; _adminLogin.lockUntil=0; setLockMsg("");
-      sessionStorage.setItem(AUTH_KEY, JSON.stringify({ ts: Date.now() }));
-      setAuthed(true); return true;
-    }
-    setLockMsg(`Incorrect password. ${5 - _adminLogin.count} attempt(s) remaining.`);
-    return false;
+  // On mount — restore existing session if still valid
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setAuthed(!!session);
+      setLoading(false);
+    });
+    // Listen for auth state changes (sign in, sign out, token refresh)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setAuthed(!!session);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const login = async (email, password) => {
+    setAuthErr("");
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) { setAuthErr(error.message); return false; }
+    return true;
   };
-  const logout = () => { sessionStorage.removeItem(AUTH_KEY); setAuthed(false); };
-  return { authed, login, logout, lockMsg };
+
+  const logout = async () => {
+    await supabase.auth.signOut();
+    setAuthed(false);
+  };
+
+  return { authed, loading, login, logout, authErr };
 }
 
 /* ═══════════════════════════════════════════════
@@ -243,9 +248,21 @@ function Sidebar({ logout }) {
 /* ═══════════════════════════════════════════════
    LOGIN
 ═══════════════════════════════════════════════ */
-function Login({ login, lockMsg }) {
-  const [pw, setPw] = useState(""); const [err, setErr] = useState(""); const [loading, setLoading] = useState(false);
-  const submit = async () => { setLoading(true); setErr(""); const ok = await login(pw); if (!ok) setErr(lockMsg || "Incorrect password."); setLoading(false); };
+function Login({ login, authErr }) {
+  const [email, setEmail]   = useState("");
+  const [pw, setPw]         = useState("");
+  const [err, setErr]       = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async () => {
+    if (!email.trim()) { setErr("Email is required."); return; }
+    if (!pw.trim())    { setErr("Password is required."); return; }
+    setLoading(true); setErr("");
+    const ok = await login(email.trim(), pw);
+    if (!ok) setErr(authErr || "Incorrect email or password.");
+    setLoading(false);
+  };
+
   return (
     <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--bg)"}}>
       <Styles />
@@ -254,12 +271,25 @@ function Login({ login, lockMsg }) {
           <img src={LOGO_WHITE} alt="1204Studios" style={{height:30,width:"auto",display:"block",margin:"0 auto 12px"}} />
           <p style={{fontSize:13.5,color:"var(--dim)"}}>Sign in to CMS & CRM</p>
         </div>
+        <label className="lbl" style={{display:"block",marginBottom:8}}>Email</label>
+        <input
+          type="email" className="input" placeholder="admin@1204studios.com"
+          value={email} onChange={e=>setEmail(e.target.value)}
+          onKeyDown={e=>e.key==="Enter"&&submit()}
+          autoFocus style={{marginBottom:16}}
+        />
         <label className="lbl" style={{display:"block",marginBottom:8}}>Password</label>
-        <input type="password" className="input" placeholder="Admin password" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} autoFocus style={{marginBottom:err?6:16}} />
+        <input
+          type="password" className="input" placeholder="Your password"
+          value={pw} onChange={e=>setPw(e.target.value)}
+          onKeyDown={e=>e.key==="Enter"&&submit()}
+          style={{marginBottom:err?6:20}}
+        />
         {err && <p style={{fontSize:12,color:"#f87171",marginBottom:14}}>{err}</p>}
         <button onClick={submit} disabled={loading} className="btn btn-primary" style={{width:"100%",justifyContent:"center",padding:"12px"}}>
           {loading ? <span className="spin">◌</span> : "Sign In →"}
         </button>
+        <p style={{fontSize:11,color:"var(--muted)",textAlign:"center",marginTop:20}}>admin.1204studios.com · Restricted Access</p>
       </div>
     </div>
   );
@@ -847,11 +877,19 @@ function AdminLayout({ logout }) {
 }
 
 export default function App() {
-  const { authed, login, logout, lockMsg } = useAuth();
+  const { authed, loading, login, logout, authErr } = useAuth();
+  if (loading) {
+    return (
+      <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#080808"}}>
+        <Styles />
+        <span style={{fontSize:13,color:"rgba(240,236,230,0.3)"}}>Loading…</span>
+      </div>
+    );
+  }
   return (
     <BrowserRouter>
       <Styles />
-      {authed ? <AdminLayout logout={logout} /> : <Login login={login} lockMsg={lockMsg} />}
+      {authed ? <AdminLayout logout={logout} /> : <Login login={login} authErr={authErr} />}
     </BrowserRouter>
   );
 }
