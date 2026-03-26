@@ -6,6 +6,25 @@ import { createClient } from "@supabase/supabase-js";
    SUPABASE CLIENT
 ═══════════════════════════════════════════════ */
 const LOGO_WHITE = "/logo-white.svg";
+// Inline SVG fallback for when the file doesn't load
+function Logo({ height = 26, style = {} }) {
+  return (
+    <img
+      src={LOGO_WHITE}
+      alt="1204Studios"
+      style={{ height, width: "auto", display: "block", ...style }}
+      onError={e => {
+        // If SVG file fails to load, replace with text fallback
+        e.target.style.display = "none";
+        const span = document.createElement("span");
+        span.innerHTML = '<span style="font-family:var(--display);font-weight:800;font-size:' + (height * 0.7) + 'px;color:#fff;letter-spacing:-.02em">1204</span><span style="font-family:var(--display);font-weight:800;font-size:' + (height * 0.7) + 'px;color:#ff2d78;letter-spacing:-.02em">Studios</span>';
+        span.style.display = "flex";
+        span.style.alignItems = "center";
+        e.target.parentNode.insertBefore(span, e.target);
+      }}
+    />
+  );
+}
 const SB_URL = import.meta.env.VITE_SUPABASE_URL || "";
 const SB_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 
@@ -226,7 +245,7 @@ function Sidebar({ logout }) {
   return (
     <aside style={{width:220,flexShrink:0,background:"var(--s1)",borderRight:"1px solid var(--bd)",display:"flex",flexDirection:"column",height:"100vh",overflow:"hidden"}}>
       <div style={{padding:"16px 16px 12px",borderBottom:"1px solid var(--bd)"}}>
-        <Link to="/"><img src={LOGO_WHITE} alt="1204Studios" style={{height:26,width:"auto",display:"block"}} /></Link>
+        <Link to="/"><Logo height={26} /></Link>
         <p style={{fontSize:10,color:"var(--muted)",marginTop:3,letterSpacing:"1px",textTransform:"uppercase",fontWeight:700}}>Admin</p>
       </div>
       <nav style={{padding:"8px",flex:1,overflowY:"auto"}}>
@@ -275,7 +294,7 @@ function Login({ login, authErr }) {
       <Styles />
       <div className="card fade-up" style={{width:"100%",maxWidth:380,padding:"44px 36px"}}>
         <div style={{marginBottom:32,textAlign:"center"}}>
-          <img src={LOGO_WHITE} alt="1204Studios" style={{height:30,width:"auto",display:"block",margin:"0 auto 12px"}} />
+          <Logo height={30} style={{margin:"0 auto 12px"}} />
           <p style={{fontSize:13.5,color:"var(--dim)"}}>Sign in to CMS & CRM</p>
         </div>
         <label className="lbl" style={{display:"block",marginBottom:8}}>Email</label>
@@ -650,7 +669,7 @@ function BlogManager() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    try { setPosts(await sbFetch("blog_posts",{query:"select=*&order=display_order.asc,created_at.desc"})); }
+    try { setPosts(await sbFetch("blog_posts",{query:"select=*&order=created_at.desc"})); }
     catch { show("Failed to load","error"); }
     setLoading(false);
   }, [show]);
@@ -659,12 +678,22 @@ function BlogManager() {
 
   const save = async (data) => {
     try {
-      const {id,_slugEdited,...payload} = data;
-      const cleaned = {
-        ...payload,
-        slug:payload.slug.toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,""),
-        tags: tagsToArray(payload.tags),
-      };
+      const {id, _slugEdited, ...raw} = data;
+      const slug = (raw.slug||slugify(raw.title)).toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,"");
+      const cleaned = {};
+      if (raw.title != null) cleaned.title = raw.title;
+      cleaned.slug = slug;
+      if (raw.category != null) cleaned.category = raw.category;
+      if (raw.author != null) cleaned.author = raw.author;
+      if (raw.cover_image != null) cleaned.cover_image = raw.cover_image;
+      if (raw.excerpt != null) cleaned.excerpt = raw.excerpt;
+      if (raw.content != null) cleaned.content = raw.content;
+      if (raw.read_time != null) cleaned.read_time = raw.read_time;
+      cleaned.featured = !!raw.featured;
+      cleaned.published = raw.published !== false;
+      cleaned.display_order = raw.display_order || 0;
+      cleaned.tags = tagsToArray(raw.tags);
+
       if (id) await sbFetch(`blog_posts?id=eq.${id}`,{method:"PATCH",body:cleaned});
       else await sbFetch("blog_posts",{method:"POST",body:{...cleaned,id:crypto.randomUUID(),created_at:new Date().toISOString()}});
       show("Saved"); setModal(null); load();
@@ -769,12 +798,31 @@ function PortfolioManager() {
 
   const save = async (data) => {
     try {
-      const {id,_slugEdited,...payload} = data;
-      const cleaned = {
-        ...payload,
-        slug:(payload.slug||slugify(payload.title)).toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,""),
-        tags: tagsToArray(payload.tags),
-      };
+      const {id, _slugEdited, ...raw} = data;
+      // Only send columns that exist in case_studies table
+      const slug = (raw.slug||slugify(raw.title)).toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,"");
+      const cleaned = {};
+      // Core fields (always exist)
+      if (raw.title != null) cleaned.title = raw.title;
+      cleaned.slug = slug;
+      if (raw.client != null) cleaned.client = raw.client;
+      if (raw.category != null) cleaned.category = raw.category;
+      if (raw.cover_image != null) cleaned.cover_image = raw.cover_image;
+      if (raw.excerpt != null) cleaned.excerpt = raw.excerpt;
+      if (raw.content != null) cleaned.content = raw.content;
+      if (raw.results != null) cleaned.results = raw.results;
+      if (raw.testimonial != null) cleaned.testimonial = raw.testimonial;
+      cleaned.featured = !!raw.featured;
+      cleaned.published = raw.published !== false;
+      cleaned.display_order = raw.display_order || 0;
+      // Tags: convert string to array for Postgres text[] column
+      cleaned.tags = tagsToArray(raw.tags);
+      // New fields (safe: Supabase ignores unknown columns on PATCH)
+      if (raw.hero_color != null) cleaned.hero_color = raw.hero_color;
+      if (raw.year != null) cleaned.year = raw.year;
+      if (raw.challenge != null) cleaned.challenge = raw.challenge;
+      if (raw.approach != null) cleaned.approach = raw.approach;
+
       if (id) await sbFetch(`case_studies?id=eq.${id}`,{method:"PATCH",body:cleaned});
       else await sbFetch("case_studies",{method:"POST",body:{...cleaned,id:crypto.randomUUID(),created_at:new Date().toISOString()}});
       show("Saved"); setModal(null); load();
