@@ -251,6 +251,7 @@ function Sidebar({ logout }) {
 function Login({ login, authErr }) {
   const [email, setEmail]   = useState("");
   const [pw, setPw]         = useState("");
+  const [showPw, setShowPw] = useState(false);
   const [err, setErr]       = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -279,12 +280,28 @@ function Login({ login, authErr }) {
           autoFocus style={{marginBottom:16}}
         />
         <label className="lbl" style={{display:"block",marginBottom:8}}>Password</label>
-        <input
-          type="password" className="input" placeholder="Your password"
-          value={pw} onChange={e=>setPw(e.target.value)}
-          onKeyDown={e=>e.key==="Enter"&&submit()}
-          style={{marginBottom:err?6:20}}
-        />
+        <div style={{position:"relative",marginBottom:err?6:20}}>
+          <input
+            type={showPw?"text":"password"} className="input" placeholder="Your password"
+            value={pw} onChange={e=>setPw(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&submit()}
+            style={{paddingRight:42}}
+          />
+          <button
+            type="button"
+            onClick={()=>setShowPw(v=>!v)}
+            style={{position:"absolute",right:1,top:1,bottom:1,width:38,display:"flex",alignItems:"center",justifyContent:"center",background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:16,borderRadius:"0 7px 7px 0",transition:"color .15s"}}
+            onMouseOver={e=>e.currentTarget.style.color="var(--text)"}
+            onMouseOut={e=>e.currentTarget.style.color="var(--muted)"}
+            title={showPw?"Hide password":"Show password"}
+          >
+            {showPw ? (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/></svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            )}
+          </button>
+        </div>
         {err && <p style={{fontSize:12,color:"#f87171",marginBottom:14}}>{err}</p>}
         <button onClick={submit} disabled={loading} className="btn btn-primary" style={{width:"100%",justifyContent:"center",padding:"12px"}}>
           {loading ? <span className="spin">◌</span> : "Sign In →"}
@@ -623,7 +640,7 @@ function BlogManager() {
   const [posts, setPosts] = useState([]); const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null); const [confirm, setConfirm] = useState(null);
   const { show, el:toastEl } = useToast();
-  const EMPTY = {title:"",slug:"",content:"",excerpt:"",cover_image:"",featured:false,display_order:0,category:"",tags:"",author:"",published:true};
+  const EMPTY = {title:"",slug:"",content:"",excerpt:"",cover_image:"",featured:false,display_order:0,category:"",tags:"",author:"",read_time:"5 min read",published:true};
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -706,6 +723,7 @@ function PostModal({ mode, data, onSave, onClose }) {
             </div>
             <div><label className="lbl" style={{display:"block",marginBottom:8}}>Category</label><input className="input" value={form.category||""} onChange={e=>set("category",e.target.value)} /></div>
             <div><label className="lbl" style={{display:"block",marginBottom:8}}>Author</label><input className="input" value={form.author||""} onChange={e=>set("author",e.target.value)} /></div>
+            <div><label className="lbl" style={{display:"block",marginBottom:8}}>Read Time</label><input className="input" value={form.read_time||""} onChange={e=>set("read_time",e.target.value)} placeholder="5 min read" /></div>
             <div><label className="lbl" style={{display:"block",marginBottom:8}}>Display Order</label><input type="number" className="input" value={form.display_order||0} onChange={e=>set("display_order",+e.target.value)} /></div>
           </div>
           <div><label className="lbl" style={{display:"block",marginBottom:8}}>Excerpt</label><textarea className="input" value={form.excerpt||""} onChange={e=>set("excerpt",e.target.value)} style={{minHeight:70}} /></div>
@@ -728,7 +746,7 @@ function PortfolioManager() {
   const [items, setItems] = useState([]); const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null); const [confirm, setConfirm] = useState(null);
   const { show, el:toastEl } = useToast();
-  const EMPTY = {title:"",slug:"",client:"",category:"",tags:"",cover_image:"",content:"",excerpt:"",featured:false,display_order:0,results:"",testimonial:"",published:true};
+  const EMPTY = {title:"",slug:"",client:"",category:"",tags:"",cover_image:"",hero_color:"#1a1a1a",year:new Date().getFullYear().toString(),content:"",excerpt:"",challenge:"",approach:"",results:"",featured:false,display_order:0,testimonial:"",published:true};
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -816,10 +834,17 @@ function CSModal({ mode, data, onSave, onClose }) {
                 {["Brand Identity","Marketing Campaign","Print Media","Web Design","Strategy","Other"].map(o=><option key={o} value={o}>{o}</option>)}
               </select>
             </div>
+            <div><label className="lbl" style={{display:"block",marginBottom:8}}>Year</label><input className="input" value={form.year||""} onChange={e=>set("year",e.target.value)} placeholder="2025" /></div>
+            <div><label className="lbl" style={{display:"block",marginBottom:8}}>Hero Colour</label>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                <input type="color" value={form.hero_color||"#1a1a1a"} onChange={e=>set("hero_color",e.target.value)} style={{width:36,height:36,border:"1px solid var(--bd2)",borderRadius:6,background:"var(--s2)",cursor:"pointer",padding:2}} />
+                <input className="input" value={form.hero_color||"#1a1a1a"} onChange={e=>set("hero_color",e.target.value)} placeholder="#1a1a1a" style={{fontFamily:"monospace"}} />
+              </div>
+            </div>
             <div><label className="lbl" style={{display:"block",marginBottom:8}}>Tags</label><input className="input" value={form.tags||""} onChange={e=>set("tags",e.target.value)} placeholder="Branding, NGO, Lagos" /></div>
             <div><label className="lbl" style={{display:"block",marginBottom:8}}>Display Order</label><input type="number" className="input" value={form.display_order||0} onChange={e=>set("display_order",+e.target.value)} /></div>
           </div>
-          {[{k:"excerpt",l:"Excerpt",p:"One paragraph summary"},{k:"content",l:"Full Content",p:"Full write-up"},{k:"results",l:"Results",p:"What was the outcome?"},{k:"testimonial",l:"Testimonial",p:"Client quote"}].map(f=>(
+          {[{k:"excerpt",l:"Excerpt",p:"One paragraph summary"},{k:"challenge",l:"The Challenge",p:"What problem did the client have?"},{k:"approach",l:"Our Approach",p:"How did you solve it?"},{k:"results",l:"The Result",p:"What was the outcome?"},{k:"content",l:"Full Content",p:"Full write-up (optional)"},{k:"testimonial",l:"Testimonial",p:"Client quote"}].map(f=>(
             <div key={f.k}><label className="lbl" style={{display:"block",marginBottom:8}}>{f.l}</label><textarea className="input" placeholder={f.p} value={form[f.k]||""} onChange={e=>set(f.k,e.target.value)} style={{minHeight:70}} /></div>
           ))}
           <div style={{display:"flex",gap:20}}>
