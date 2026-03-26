@@ -34,7 +34,7 @@ const supabase = createClient(SB_URL, SB_KEY);
 // sbFetch uses the authenticated user's JWT so RLS policies apply correctly
 async function sbFetch(table, opts = {}) {
   const { method = "GET", query = "", body } = opts;
-  // Get current session token — falls back to anon key if not signed in
+  // Refresh session to avoid stale tokens causing hangs
   const { data: { session } } = await supabase.auth.getSession();
   const token = session?.access_token || SB_KEY;
   const headers = {
@@ -44,11 +44,21 @@ async function sbFetch(table, opts = {}) {
     "Prefer": "return=representation",
   };
   const url = `${SB_URL}/rest/v1/${table}${query ? "?" + query : ""}`;
-  const r = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
-  if (!r.ok) { const e = await r.text(); throw new Error(e); }
-  if (method === "DELETE") return true;
-  const text = await r.text();
-  return text ? JSON.parse(text) : [];
+  // 15s timeout to prevent infinite hangs
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const r = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: controller.signal });
+    clearTimeout(timeout);
+    if (!r.ok) { const e = await r.text(); throw new Error(e); }
+    if (method === "DELETE") return true;
+    const text = await r.text();
+    return text ? JSON.parse(text) : [];
+  } catch(err) {
+    clearTimeout(timeout);
+    if (err.name === "AbortError") throw new Error("Request timed out. Check your connection and try again.");
+    throw err;
+  }
 }
 
 /* ═══════════════════════════════════════════════
@@ -98,10 +108,15 @@ function fmtDate(ts) {
   return new Date(ts).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"});
 }
 // Convert comma-separated tags string to Postgres array format
-function tagsToArray(tags) {
+// Handle tags for both text and text[] column types
+function cleanTags(tags) {
   if (!tags) return null;
-  if (Array.isArray(tags)) return tags.map(t => t.trim()).filter(Boolean);
-  return String(tags).split(",").map(t => t.trim()).filter(Boolean);
+  if (Array.isArray(tags)) {
+    const arr = tags.map(t => t.trim()).filter(Boolean);
+    return arr.length ? arr : null;
+  }
+  const arr = String(tags).split(",").map(t => t.trim()).filter(Boolean);
+  return arr.length ? arr : null;
 }
 const SCORE_COLOR = s => s >= 70 ? "#22c55e" : s >= 40 ? "#eab308" : "#ef4444";
 const STATUS_COLORS = {
@@ -685,19 +700,22 @@ function BlogManager() {
       cleaned.slug = slug;
       if (raw.category != null) cleaned.category = raw.category;
       if (raw.author != null) cleaned.author = raw.author;
-      if (raw.cover_image != null) cleaned.cover_image = raw.cover_image;
+      if (raw.cover_image != null) cleaned.cover_image = raw.cover_image || null;
       if (raw.excerpt != null) cleaned.excerpt = raw.excerpt;
       if (raw.content != null) cleaned.content = raw.content;
       if (raw.read_time != null) cleaned.read_time = raw.read_time;
       cleaned.featured = !!raw.featured;
       cleaned.published = raw.published !== false;
       cleaned.display_order = raw.display_order || 0;
-      cleaned.tags = tagsToArray(raw.tags);
+      // Only include tags if the field was actually in the form
+      const t = cleanTags(raw.tags);
+      if (t !== null) cleaned.tags = t;
 
+      console.log("[BlogSave]", id ? "PATCH" : "POST", cleaned);
       if (id) await sbFetch(`blog_posts?id=eq.${id}`,{method:"PATCH",body:cleaned});
       else await sbFetch("blog_posts",{method:"POST",body:{...cleaned,id:crypto.randomUUID(),created_at:new Date().toISOString()}});
       show("Saved"); setModal(null); load();
-    } catch(e){ show("Failed: "+e.message,"error"); }
+    } catch(e){ console.error("[BlogSave] Error:", e); show("Failed: "+e.message,"error"); }
   };
 
   const del = async (id) => {
@@ -799,15 +817,13 @@ function PortfolioManager() {
   const save = async (data) => {
     try {
       const {id, _slugEdited, ...raw} = data;
-      // Only send columns that exist in case_studies table
       const slug = (raw.slug||slugify(raw.title)).toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,"");
       const cleaned = {};
-      // Core fields (always exist)
       if (raw.title != null) cleaned.title = raw.title;
       cleaned.slug = slug;
       if (raw.client != null) cleaned.client = raw.client;
       if (raw.category != null) cleaned.category = raw.category;
-      if (raw.cover_image != null) cleaned.cover_image = raw.cover_image;
+      if (raw.cover_image != null) cleaned.cover_image = raw.cover_image || null;
       if (raw.excerpt != null) cleaned.excerpt = raw.excerpt;
       if (raw.content != null) cleaned.content = raw.content;
       if (raw.results != null) cleaned.results = raw.results;
@@ -815,18 +831,18 @@ function PortfolioManager() {
       cleaned.featured = !!raw.featured;
       cleaned.published = raw.published !== false;
       cleaned.display_order = raw.display_order || 0;
-      // Tags: convert string to array for Postgres text[] column
-      cleaned.tags = tagsToArray(raw.tags);
-      // New fields (safe: Supabase ignores unknown columns on PATCH)
+      const t = cleanTags(raw.tags);
+      if (t !== null) cleaned.tags = t;
       if (raw.hero_color != null) cleaned.hero_color = raw.hero_color;
       if (raw.year != null) cleaned.year = raw.year;
       if (raw.challenge != null) cleaned.challenge = raw.challenge;
       if (raw.approach != null) cleaned.approach = raw.approach;
 
+      console.log("[PortfolioSave]", id ? "PATCH" : "POST", cleaned);
       if (id) await sbFetch(`case_studies?id=eq.${id}`,{method:"PATCH",body:cleaned});
       else await sbFetch("case_studies",{method:"POST",body:{...cleaned,id:crypto.randomUUID(),created_at:new Date().toISOString()}});
       show("Saved"); setModal(null); load();
-    } catch(e){ show("Failed: "+e.message,"error"); }
+    } catch(e){ console.error("[PortfolioSave] Error:", e); show("Failed: "+e.message,"error"); }
   };
 
   const del = async (id) => {
