@@ -32,11 +32,18 @@ const SB_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsIn
 const supabase = createClient(SB_URL, SB_KEY);
 
 // sbFetch uses the authenticated user's JWT so RLS policies apply correctly
+// Cache the auth token so we don't refresh on every request (avoids CORS issues)
+let _cachedToken = null;
+supabase.auth.onAuthStateChange((_event, session) => {
+  _cachedToken = session?.access_token || null;
+});
+supabase.auth.getSession().then(({ data: { session } }) => {
+  _cachedToken = session?.access_token || null;
+});
+
 async function sbFetch(table, opts = {}) {
   const { method = "GET", query = "", body } = opts;
-  // Refresh session to avoid stale tokens causing hangs
-  const { data: { session } } = await supabase.auth.getSession();
-  const token = session?.access_token || SB_KEY;
+  const token = _cachedToken || SB_KEY;
   const headers = {
     "apikey": SB_KEY,
     "Authorization": `Bearer ${token}`,
@@ -44,7 +51,6 @@ async function sbFetch(table, opts = {}) {
     "Prefer": "return=representation",
   };
   const url = `${SB_URL}/rest/v1/${table}${query ? "?" + query : ""}`;
-  // 15s timeout to prevent infinite hangs
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
