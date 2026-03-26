@@ -78,6 +78,12 @@ function fmtDate(ts) {
   if (!ts) return "";
   return new Date(ts).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"numeric"});
 }
+// Convert comma-separated tags string to Postgres array format
+function tagsToArray(tags) {
+  if (!tags) return null;
+  if (Array.isArray(tags)) return tags.map(t => t.trim()).filter(Boolean);
+  return String(tags).split(",").map(t => t.trim()).filter(Boolean);
+}
 const SCORE_COLOR = s => s >= 70 ? "#22c55e" : s >= 40 ? "#eab308" : "#ef4444";
 const STATUS_COLORS = {
   new:"#3b82f6", contacted:"#a855f7", qualified:"#22c55e",
@@ -654,7 +660,11 @@ function BlogManager() {
   const save = async (data) => {
     try {
       const {id,_slugEdited,...payload} = data;
-      const cleaned = {...payload, slug:payload.slug.toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,"")};
+      const cleaned = {
+        ...payload,
+        slug:payload.slug.toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,""),
+        tags: tagsToArray(payload.tags),
+      };
       if (id) await sbFetch(`blog_posts?id=eq.${id}`,{method:"PATCH",body:cleaned});
       else await sbFetch("blog_posts",{method:"POST",body:{...cleaned,id:crypto.randomUUID(),created_at:new Date().toISOString()}});
       show("Saved"); setModal(null); load();
@@ -690,7 +700,7 @@ function BlogManager() {
                   <td>{p.featured?<span className="badge badge-green">Featured</span>:<span style={{color:"var(--muted)",fontSize:12}}>—</span>}</td>
                   <td>{p.published?<span className="badge badge-blue">Published</span>:<span className="badge badge-dim">Draft</span>}</td>
                   <td><div style={{display:"flex",gap:6,justifyContent:"flex-end"}}>
-                    <button onClick={()=>setModal({...p})} className="btn btn-ghost btn-sm">Edit</button>
+                    <button onClick={()=>setModal({...p,tags:Array.isArray(p.tags)?p.tags.join(", "):p.tags||""})} className="btn btn-ghost btn-sm">Edit</button>
                     <button onClick={()=>setConfirm(p.id)} className="btn btn-danger btn-sm">Delete</button>
                   </div></td>
                 </tr>
@@ -760,7 +770,11 @@ function PortfolioManager() {
   const save = async (data) => {
     try {
       const {id,_slugEdited,...payload} = data;
-      const cleaned = {...payload, slug:(payload.slug||slugify(payload.title)).toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,"")};
+      const cleaned = {
+        ...payload,
+        slug:(payload.slug||slugify(payload.title)).toLowerCase().replace(/[^a-z0-9-]/g,"-").replace(/-+/g,"-").replace(/^-|-$/g,""),
+        tags: tagsToArray(payload.tags),
+      };
       if (id) await sbFetch(`case_studies?id=eq.${id}`,{method:"PATCH",body:cleaned});
       else await sbFetch("case_studies",{method:"POST",body:{...cleaned,id:crypto.randomUUID(),created_at:new Date().toISOString()}});
       show("Saved"); setModal(null); load();
